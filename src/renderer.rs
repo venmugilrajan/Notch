@@ -374,6 +374,9 @@ impl D2DRenderer {
         media: &MediaInfo,
         prod: &ProductivityManager,
         clip: &ClipboardManager,
+        conv: &crate::modules::converters::ConverterState,
+        links: &crate::modules::links::LinksManager,
+        drop_srv: &crate::modules::drop_server::DropServer,
         enabled_modules: &crate::config::EnabledModules,
         time_format_24h: bool,
         shrink_mode: bool,
@@ -587,10 +590,13 @@ impl D2DRenderer {
                         self.render_file_shelf_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, prod)?;
                     }
                     NotchTab::Converters => {
-                        self.render_converters_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush)?;
+                        self.render_converters_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, conv)?;
                     }
                     NotchTab::Links => {
-                        self.render_links_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush)?;
+                        self.render_links_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, links)?;
+                    }
+                    NotchTab::DropTransfer => {
+                        self.render_drop_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, drop_srv, prod)?;
                     }
                     _ => {
                         let card_round = D2D1_ROUNDED_RECT {
@@ -1922,21 +1928,74 @@ impl D2DRenderer {
         target.FillRoundedRectangle(&right_rect, card_bg);
         target.DrawRoundedRectangle(&right_rect, card_border, 1.0, None);
 
-        if let Some(first_note) = prod.notes.first() {
+        let active_note = prod.notes.iter().find(|n| Some(n.id) == prod.selected_note_id).or_else(|| prod.notes.first());
+
+        if let Some(note) = active_note {
             if let Ok(mfmt) = self.get_meta_format() {
-                let status_str = if first_note.is_completed { "COMPLETED TASK" } else { "ACTIVE TASK · AUTOSAVED" };
+                let status_str = if note.is_completed { "COMPLETED TASK" } else { "ACTIVE TASK · CLICK 'EDIT' OR TYPE" };
                 let wide: Vec<u16> = status_str.encode_utf16().collect();
                 let m_r = D2D_RECT_F {
                     left: right_left + 24.0,
                     top: rect.top + 16.0,
-                    right: rect.right - 24.0,
+                    right: right_left + 240.0,
                     bottom: rect.top + 34.0,
                 };
                 target.DrawText(&wide, mfmt, &m_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
 
+            // Edit Note Button
+            let edit_btn_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.right - 140.0,
+                    top: rect.top + 12.0,
+                    right: rect.right - 80.0,
+                    bottom: rect.top + 34.0,
+                },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            target.FillRoundedRectangle(&edit_btn_r, accent);
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = "Edit".encode_utf16().collect();
+                let tr = D2D_RECT_F {
+                    left: edit_btn_r.rect.left + 16.0,
+                    top: edit_btn_r.rect.top + 4.0,
+                    right: edit_btn_r.rect.right,
+                    bottom: edit_btn_r.rect.bottom,
+                };
+                target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            // Delete Note Button
+            let del_btn_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.right - 70.0,
+                    top: rect.top + 12.0,
+                    right: rect.right - 16.0,
+                    bottom: rect.top + 34.0,
+                },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            let del_bg = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 0.16, g: 0.16, b: 0.18, a: 1.0 },
+                None,
+            )?;
+            target.FillRoundedRectangle(&del_btn_r, &del_bg);
+            target.DrawRoundedRectangle(&del_btn_r, card_border, 1.0, None);
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = "Delete".encode_utf16().collect();
+                let tr = D2D_RECT_F {
+                    left: del_btn_r.rect.left + 10.0,
+                    top: del_btn_r.rect.top + 4.0,
+                    right: del_btn_r.rect.right,
+                    bottom: del_btn_r.rect.bottom,
+                };
+                target.DrawText(&wide, mfmt, &tr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
             if let Ok(tfmt) = self.get_title_format() {
-                let wide: Vec<u16> = first_note.content.encode_utf16().collect();
+                let wide: Vec<u16> = note.content.encode_utf16().collect();
                 let t_r = D2D_RECT_F {
                     left: right_left + 24.0,
                     top: rect.top + 48.0,
@@ -2532,7 +2591,7 @@ impl D2DRenderer {
         Ok(())
     }
 
-    // Converters Page (Length, Temperature, Currency)
+    // Real Converters & Calculator Page
     unsafe fn render_converters_page(
         &mut self,
         target: &ID2D1DCRenderTarget,
@@ -2542,6 +2601,7 @@ impl D2DRenderer {
         white: &ID2D1SolidColorBrush,
         secondary: &ID2D1SolidColorBrush,
         accent: &ID2D1SolidColorBrush,
+        conv: &crate::modules::converters::ConverterState,
     ) -> Result<()> {
         let card_round = D2D1_ROUNDED_RECT {
             rect: *rect,
@@ -2551,95 +2611,193 @@ impl D2DRenderer {
         target.FillRoundedRectangle(&card_round, card_bg);
         target.DrawRoundedRectangle(&card_round, card_border, 1.0, None);
 
-        if let Ok(mfmt) = self.get_meta_format() {
-            let wide: Vec<u16> = "LIVE UNIT & CURRENCY CONVERTERS".encode_utf16().collect();
-            let hr = D2D_RECT_F {
-                left: rect.left + 24.0,
-                top: rect.top + 20.0,
-                right: rect.right - 24.0,
-                bottom: rect.top + 36.0,
-            };
-            target.DrawText(&wide, mfmt, &hr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-        }
+        // Category Tabs: Length | Weight | Temperature | Currency | Data
+        let categories = crate::modules::converters::ConverterState::categories();
+        let cat_w = (rect.right - rect.left - 48.0 - (4.0 * 8.0)) / 5.0;
+        let top_cat_y = rect.top + 16.0;
 
-        let conv_cards = [
-            ("Length", "1 Meter (m)", "= 3.28084 Feet (ft)", "100 cm · 39.37 inches"),
-            ("Temperature", "20 °Celsius (°C)", "= 68.0 °Fahrenheit (°F)", "293.15 Kelvin (K)"),
-            ("Currency", "1 USD ($)", "≈ 0.92 EUR / ₹84.5 INR", "Real ECB reference rate"),
-        ];
+        for (i, cat_name) in categories.iter().enumerate() {
+            let cx = rect.left + 24.0 + (i as f32 * (cat_w + 8.0));
+            let is_sel = (i == 0 && conv.category == crate::modules::converters::ConverterCategory::Length)
+                || (i == 1 && conv.category == crate::modules::converters::ConverterCategory::Weight)
+                || (i == 2 && conv.category == crate::modules::converters::ConverterCategory::Temperature)
+                || (i == 3 && conv.category == crate::modules::converters::ConverterCategory::Currency)
+                || (i == 4 && conv.category == crate::modules::converters::ConverterCategory::Data);
 
-        let card_w = (rect.right - rect.left - 48.0 - 24.0) / 3.0;
-        let card_h = 130.0;
-        let top_y = rect.top + 50.0;
-
-        for (i, (cat, from, to, note)) in conv_cards.iter().enumerate() {
-            let cx = rect.left + 24.0 + (i as f32 * (card_w + 12.0));
-            let sub_round = D2D1_ROUNDED_RECT {
+            let tab_r = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: cx,
-                    top: top_y,
-                    right: cx + card_w,
-                    bottom: top_y + card_h,
+                    top: top_cat_y,
+                    right: cx + cat_w,
+                    bottom: top_cat_y + 28.0,
                 },
-                radiusX: 12.0,
-                radiusY: 12.0,
+                radiusX: 6.0,
+                radiusY: 6.0,
             };
-            let sub_bg = target.CreateSolidColorBrush(
-                &D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.14, a: 1.0 },
-                None,
-            )?;
-            target.FillRoundedRectangle(&sub_round, &sub_bg);
-            target.DrawRoundedRectangle(&sub_round, card_border, 1.0, None);
+            if is_sel {
+                target.FillRoundedRectangle(&tab_r, accent);
+            } else {
+                let tab_bg = target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.14, a: 1.0 },
+                    None,
+                )?;
+                target.FillRoundedRectangle(&tab_r, &tab_bg);
+                target.DrawRoundedRectangle(&tab_r, card_border, 1.0, None);
+            }
 
             if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = cat.to_uppercase().encode_utf16().collect();
+                let wide: Vec<u16> = cat_name.encode_utf16().collect();
                 let tr = D2D_RECT_F {
-                    left: cx + 16.0,
-                    top: top_y + 14.0,
-                    right: cx + card_w - 16.0,
-                    bottom: top_y + 28.0,
+                    left: cx + 4.0,
+                    top: top_cat_y + 6.0,
+                    right: cx + cat_w - 4.0,
+                    bottom: top_cat_y + 24.0,
                 };
-                target.DrawText(&wide, mfmt, &tr, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                let brush = if is_sel { white } else { secondary };
+                target.DrawText(&wide, mfmt, &tr, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
+        }
 
-            if let Ok(bfmt) = self.get_body_format() {
-                let wide: Vec<u16> = from.encode_utf16().collect();
-                let fr = D2D_RECT_F {
-                    left: cx + 16.0,
-                    top: top_y + 36.0,
-                    right: cx + card_w - 16.0,
-                    bottom: top_y + 56.0,
-                };
-                target.DrawText(&wide, bfmt, &fr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
+        // Two Big Converter Cards: Input Card (Left) and Converted Output Card (Right)
+        let card_top = top_cat_y + 42.0;
+        let card_w = (rect.right - rect.left - 48.0 - 24.0) / 2.0;
+        let card_h = 136.0;
 
-            if let Ok(tfmt) = self.get_title_format() {
-                let wide: Vec<u16> = to.encode_utf16().collect();
-                let tor = D2D_RECT_F {
-                    left: cx + 16.0,
-                    top: top_y + 58.0,
-                    right: cx + card_w - 16.0,
-                    bottom: top_y + 88.0,
-                };
-                target.DrawText(&wide, tfmt, &tor, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
+        // Left: Input Card
+        let left_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.left + 24.0,
+                top: card_top,
+                right: rect.left + 24.0 + card_w,
+                bottom: card_top + card_h,
+            },
+            radiusX: 12.0,
+            radiusY: 12.0,
+        };
+        let card_dark = target.CreateSolidColorBrush(
+            &D2D1_COLOR_F { r: 0.10, g: 0.10, b: 0.12, a: 1.0 },
+            None,
+        )?;
+        target.FillRoundedRectangle(&left_r, &card_dark);
+        target.DrawRoundedRectangle(&left_r, card_border, 1.0, None);
 
+        let units = conv.units();
+        let from_unit_name = units.get(conv.from_unit).unwrap_or(&"From Unit");
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let label = format!("FROM: {} (CLICK UNIT TO SWITCH)", from_unit_name.to_uppercase());
+            let wide: Vec<u16> = label.encode_utf16().collect();
+            let lr = D2D_RECT_F {
+                left: left_r.rect.left + 16.0,
+                top: card_top + 14.0,
+                right: left_r.rect.right - 16.0,
+                bottom: card_top + 32.0,
+            };
+            target.DrawText(&wide, mfmt, &lr, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        if let Ok(nfmt) = self.get_number_format() {
+            let val_str = format!("{:.2}", conv.input_value);
+            let wide: Vec<u16> = val_str.encode_utf16().collect();
+            let vr = D2D_RECT_F {
+                left: left_r.rect.left + 16.0,
+                top: card_top + 40.0,
+                right: left_r.rect.right - 16.0,
+                bottom: card_top + 80.0,
+            };
+            target.DrawText(&wide, nfmt, &vr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // Quick adjust chips: [-10] [-1] [+1] [+10]
+        let adjust_chips = ["-10", "-1", "+1", "+10"];
+        let mut chip_x = left_r.rect.left + 16.0;
+        for c in adjust_chips.iter() {
+            let cr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: chip_x,
+                    top: card_top + 90.0,
+                    right: chip_x + 44.0,
+                    bottom: card_top + 118.0,
+                },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            target.FillRoundedRectangle(&cr, card_bg);
+            target.DrawRoundedRectangle(&cr, card_border, 1.0, None);
             if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = note.encode_utf16().collect();
-                let nr = D2D_RECT_F {
-                    left: cx + 16.0,
-                    top: top_y + 96.0,
-                    right: cx + card_w - 16.0,
-                    bottom: top_y + 114.0,
+                let wide: Vec<u16> = c.encode_utf16().collect();
+                let txt_r = D2D_RECT_F {
+                    left: chip_x + 8.0,
+                    top: card_top + 95.0,
+                    right: chip_x + 40.0,
+                    bottom: card_top + 116.0,
                 };
-                target.DrawText(&wide, mfmt, &nr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                target.DrawText(&wide, mfmt, &txt_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
+            chip_x += 52.0;
+        }
+
+        // Right: Converted Result Card
+        let right_x = rect.left + 24.0 + card_w + 24.0;
+        let right_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: right_x,
+                top: card_top,
+                right: right_x + card_w,
+                bottom: card_top + card_h,
+            },
+            radiusX: 12.0,
+            radiusY: 12.0,
+        };
+        target.FillRoundedRectangle(&right_r, &card_dark);
+        target.DrawRoundedRectangle(&right_r, card_border, 1.0, None);
+
+        let (result_val, unit_sym) = conv.convert();
+        let to_unit_name = units.get(conv.to_unit).unwrap_or(&"To Unit");
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let label = format!("TO: {} (CLICK UNIT TO SWITCH)", to_unit_name.to_uppercase());
+            let wide: Vec<u16> = label.encode_utf16().collect();
+            let lr = D2D_RECT_F {
+                left: right_x + 16.0,
+                top: card_top + 14.0,
+                right: right_r.rect.right - 16.0,
+                bottom: card_top + 32.0,
+            };
+            target.DrawText(&wide, mfmt, &lr, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        if let Ok(nfmt) = self.get_number_format() {
+            let val_str = format!("{:.3} {}", result_val, unit_sym);
+            let wide: Vec<u16> = val_str.encode_utf16().collect();
+            let vr = D2D_RECT_F {
+                left: right_x + 16.0,
+                top: card_top + 40.0,
+                right: right_r.rect.right - 16.0,
+                bottom: card_top + 80.0,
+            };
+            target.DrawText(&wide, nfmt, &vr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let note = match conv.category {
+                crate::modules::converters::ConverterCategory::Currency => "Live reference calculation · Instant auto-convert",
+                _ => "Precise ISO & NIST unit conversion · Click units to cycle",
+            };
+            let wide: Vec<u16> = note.encode_utf16().collect();
+            let nr = D2D_RECT_F {
+                left: right_x + 16.0,
+                top: card_top + 96.0,
+                right: right_r.rect.right - 16.0,
+                bottom: card_top + 118.0,
+            };
+            target.DrawText(&wide, mfmt, &nr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         Ok(())
     }
 
-    // Links & Bookmarks Page
+    // Links & Bookmarks Page (with Add Link and Delete)
     unsafe fn render_links_page(
         &mut self,
         target: &ID2D1DCRenderTarget,
@@ -2649,6 +2807,7 @@ impl D2DRenderer {
         white: &ID2D1SolidColorBrush,
         secondary: &ID2D1SolidColorBrush,
         accent: &ID2D1SolidColorBrush,
+        links_mgr: &crate::modules::links::LinksManager,
     ) -> Result<()> {
         let card_round = D2D1_ROUNDED_RECT {
             rect: *rect,
@@ -2659,14 +2818,38 @@ impl D2DRenderer {
         target.DrawRoundedRectangle(&card_round, card_border, 1.0, None);
 
         if let Ok(mfmt) = self.get_meta_format() {
-            let wide: Vec<u16> = "QUICK LINKS & SEARCH ENGINES".encode_utf16().collect();
+            let count_str = format!("QUICK LINKS & SEARCH ENGINES ({})", links_mgr.links.len());
+            let wide: Vec<u16> = count_str.encode_utf16().collect();
             let hr = D2D_RECT_F {
                 left: rect.left + 24.0,
                 top: rect.top + 20.0,
-                right: rect.right - 24.0,
+                right: rect.right - 120.0,
                 bottom: rect.top + 36.0,
             };
             target.DrawText(&wide, mfmt, &hr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // "+ Add Link" button at top right
+        let add_btn_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.right - 110.0,
+                top: rect.top + 14.0,
+                right: rect.right - 24.0,
+                bottom: rect.top + 36.0,
+            },
+            radiusX: 6.0,
+            radiusY: 6.0,
+        };
+        target.FillRoundedRectangle(&add_btn_r, accent);
+        if let Ok(mfmt) = self.get_meta_format() {
+            let wide: Vec<u16> = "+ Add Link".encode_utf16().collect();
+            let tr = D2D_RECT_F {
+                left: add_btn_r.rect.left + 10.0,
+                top: add_btn_r.rect.top + 4.0,
+                right: add_btn_r.rect.right,
+                bottom: add_btn_r.rect.bottom,
+            };
+            target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         // Search Engine Selector Chips
@@ -2675,6 +2858,7 @@ impl D2DRenderer {
         let chip_y = rect.top + 46.0;
 
         for (i, name) in engines.iter().enumerate() {
+            let is_sel = i == links_mgr.selected_engine_index;
             let chip_r = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: cur_chip_x,
@@ -2685,7 +2869,7 @@ impl D2DRenderer {
                 radiusX: 6.0,
                 radiusY: 6.0,
             };
-            if i == 0 {
+            if is_sel {
                 target.FillRoundedRectangle(&chip_r, accent);
             } else {
                 let c_bg = target.CreateSolidColorBrush(
@@ -2704,24 +2888,19 @@ impl D2DRenderer {
                     right: cur_chip_x + 86.0,
                     bottom: chip_y + 24.0,
                 };
-                let brush = if i == 0 { white } else { secondary };
+                let brush = if is_sel { white } else { secondary };
                 target.DrawText(&wide, mfmt, &txt_r, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
             cur_chip_x += 98.0;
         }
 
-        // Saved Bookmarks Tiles
-        let bookmarks = [
-            ("GitHub", "https://github.com", "Code hosting & pull requests"),
-            ("YouTube", "https://youtube.com", "Videos and music streams"),
-            ("Google", "https://google.com", "Search and tools"),
-            ("ChatGPT", "https://chatgpt.com", "AI conversation & assistance"),
-        ];
-
+        // Saved Bookmarks Tiles (from dynamic links_mgr)
         let b_top = chip_y + 42.0;
-        let tile_w = (rect.right - rect.left - 48.0 - 36.0) / 4.0;
+        let tile_count = links_mgr.links.len().max(1);
+        let max_display = 4.min(tile_count);
+        let tile_w = (rect.right - rect.left - 48.0 - (12.0 * (max_display as f32 - 1.0))) / (max_display as f32);
 
-        for (i, (title, url, desc)) in bookmarks.iter().enumerate() {
+        for (i, link) in links_mgr.links.iter().take(4).enumerate() {
             let bx = rect.left + 24.0 + (i as f32 * (tile_w + 12.0));
             let tile_r = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -2740,19 +2919,33 @@ impl D2DRenderer {
             target.FillRoundedRectangle(&tile_r, &tile_bg);
             target.DrawRoundedRectangle(&tile_r, card_border, 1.0, None);
 
+            // Title
             if let Ok(bfmt) = self.get_body_format() {
-                let wide: Vec<u16> = title.encode_utf16().collect();
+                let wide: Vec<u16> = link.title.encode_utf16().collect();
                 let tr = D2D_RECT_F {
                     left: bx + 12.0,
                     top: b_top + 10.0,
-                    right: bx + tile_w - 12.0,
+                    right: bx + tile_w - 28.0,
                     bottom: b_top + 30.0,
                 };
                 target.DrawText(&wide, bfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
 
+            // Remove link "×" icon at top right of tile
             if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = url.encode_utf16().collect();
+                let wide: Vec<u16> = "×".encode_utf16().collect();
+                let xr = D2D_RECT_F {
+                    left: bx + tile_w - 22.0,
+                    top: b_top + 6.0,
+                    right: bx + tile_w - 6.0,
+                    bottom: b_top + 24.0,
+                };
+                target.DrawText(&wide, mfmt, &xr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            // URL
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = link.url.encode_utf16().collect();
                 let ur = D2D_RECT_F {
                     left: bx + 12.0,
                     top: b_top + 32.0,
@@ -2761,7 +2954,7 @@ impl D2DRenderer {
                 };
                 target.DrawText(&wide, mfmt, &ur, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                let wide_d: Vec<u16> = desc.encode_utf16().collect();
+                let wide_d: Vec<u16> = link.desc.encode_utf16().collect();
                 let dr = D2D_RECT_F {
                     left: bx + 12.0,
                     top: b_top + 52.0,
@@ -2770,6 +2963,165 @@ impl D2DRenderer {
                 };
                 target.DrawText(&wide_d, mfmt, &dr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
+        }
+
+        Ok(())
+    }
+
+    // Real Wi-Fi Drop Page (Local Wi-Fi file transfer to Phone)
+    unsafe fn render_drop_page(
+        &mut self,
+        target: &ID2D1DCRenderTarget,
+        rect: &D2D_RECT_F,
+        card_bg: &ID2D1SolidColorBrush,
+        card_border: &ID2D1SolidColorBrush,
+        white: &ID2D1SolidColorBrush,
+        secondary: &ID2D1SolidColorBrush,
+        accent: &ID2D1SolidColorBrush,
+        drop_srv: &crate::modules::drop_server::DropServer,
+        prod: &ProductivityManager,
+    ) -> Result<()> {
+        let card_round = D2D1_ROUNDED_RECT {
+            rect: *rect,
+            radiusX: 16.0,
+            radiusY: 16.0,
+        };
+        target.FillRoundedRectangle(&card_round, card_bg);
+        target.DrawRoundedRectangle(&card_round, card_border, 1.0, None);
+
+        let half_w = (rect.right - rect.left - 48.0 - 24.0) / 2.0;
+        let content_h = rect.bottom - rect.top - 48.0;
+
+        // Left Card: Parked files to share
+        let left_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.left + 24.0,
+                top: rect.top + 24.0,
+                right: rect.left + 24.0 + half_w,
+                bottom: rect.top + 24.0 + content_h,
+            },
+            radiusX: 12.0,
+            radiusY: 12.0,
+        };
+        let inner_card_bg = target.CreateSolidColorBrush(
+            &D2D1_COLOR_F { r: 0.10, g: 0.10, b: 0.12, a: 1.0 },
+            None,
+        )?;
+        target.FillRoundedRectangle(&left_r, &inner_card_bg);
+        target.DrawRoundedRectangle(&left_r, card_border, 1.0, None);
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let label = format!("FILES TO SEND ({})", prod.parked_files.len());
+            let wide: Vec<u16> = label.encode_utf16().collect();
+            let hr = D2D_RECT_F {
+                left: left_r.rect.left + 16.0,
+                top: left_r.rect.top + 16.0,
+                right: left_r.rect.right - 16.0,
+                bottom: left_r.rect.top + 34.0,
+            };
+            target.DrawText(&wide, mfmt, &hr, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        if prod.parked_files.is_empty() {
+            if let Ok(sfmt) = self.get_sub_format() {
+                let wide: Vec<u16> = "Drop files here or park them in File Shelf to send to your phone.".encode_utf16().collect();
+                let er = D2D_RECT_F {
+                    left: left_r.rect.left + 16.0,
+                    top: left_r.rect.top + 46.0,
+                    right: left_r.rect.right - 16.0,
+                    bottom: left_r.rect.top + 100.0,
+                };
+                target.DrawText(&wide, sfmt, &er, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        } else {
+            let mut cy = left_r.rect.top + 42.0;
+            for (i, p) in prod.parked_files.iter().take(4).enumerate() {
+                let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("File");
+                if let Ok(bfmt) = self.get_body_format() {
+                    let line = format!("{} · {}", i + 1, fname);
+                    let wide: Vec<u16> = line.encode_utf16().collect();
+                    let lr = D2D_RECT_F {
+                        left: left_r.rect.left + 16.0,
+                        top: cy,
+                        right: left_r.rect.right - 16.0,
+                        bottom: cy + 24.0,
+                    };
+                    target.DrawText(&wide, bfmt, &lr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                }
+                cy += 24.0;
+            }
+        }
+
+        // Right Card: Server Status & Phone URL Connection
+        let right_x = rect.left + 24.0 + half_w + 24.0;
+        let right_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: right_x,
+                top: rect.top + 24.0,
+                right: right_x + half_w,
+                bottom: rect.top + 24.0 + content_h,
+            },
+            radiusX: 12.0,
+            radiusY: 12.0,
+        };
+        target.FillRoundedRectangle(&right_r, &inner_card_bg);
+        target.DrawRoundedRectangle(&right_r, card_border, 1.0, None);
+
+        let is_running = drop_srv.is_running.load(std::sync::atomic::Ordering::SeqCst);
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let status_str = if is_running { "HTTP SERVER ACTIVE · READY TO PAIR" } else { "TRANSFER INACTIVE" };
+            let wide: Vec<u16> = status_str.encode_utf16().collect();
+            let hr = D2D_RECT_F {
+                left: right_x + 16.0,
+                top: right_r.rect.top + 16.0,
+                right: right_r.rect.right - 16.0,
+                bottom: right_r.rect.top + 34.0,
+            };
+            let brush = if is_running { accent } else { secondary };
+            target.DrawText(&wide, mfmt, &hr, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // Action Button: Start / Stop Server
+        let srv_btn_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: right_x + 16.0,
+                top: right_r.rect.top + 44.0,
+                right: right_x + 150.0,
+                bottom: right_r.rect.top + 74.0,
+            },
+            radiusX: 6.0,
+            radiusY: 6.0,
+        };
+        target.FillRoundedRectangle(&srv_btn_r, accent);
+        if let Ok(bfmt) = self.get_body_format() {
+            let label = if is_running { "Stop Server" } else { "Start Server" };
+            let wide: Vec<u16> = label.encode_utf16().collect();
+            let tr = D2D_RECT_F {
+                left: srv_btn_r.rect.left + 16.0,
+                top: srv_btn_r.rect.top + 6.0,
+                right: srv_btn_r.rect.right,
+                bottom: srv_btn_r.rect.bottom,
+            };
+            target.DrawText(&wide, bfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // Phone connection URL
+        if let Ok(sfmt) = self.get_sub_format() {
+            let url_text = if is_running {
+                format!("Phone URL: {}", drop_srv.url())
+            } else {
+                "Connect to the same Wi-Fi and open the URL on your mobile browser.".to_string()
+            };
+            let wide: Vec<u16> = url_text.encode_utf16().collect();
+            let ur = D2D_RECT_F {
+                left: right_x + 16.0,
+                top: right_r.rect.top + 84.0,
+                right: right_r.rect.right - 16.0,
+                bottom: right_r.rect.top + 130.0,
+            };
+            let brush = if is_running { white } else { secondary };
+            target.DrawText(&wide, sfmt, &ur, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         Ok(())

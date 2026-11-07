@@ -22,6 +22,8 @@ pub struct NoteItem {
 pub struct ProductivityManager {
     pub timers: Vec<TimerItem>,
     pub notes: Vec<NoteItem>,
+    pub selected_note_id: Option<usize>,
+    pub editing_note: bool,
     pub parked_files: Vec<PathBuf>,
     next_timer_id: usize,
     next_note_id: usize,
@@ -49,6 +51,8 @@ impl ProductivityManager {
                 },
             ],
             notes: Vec::new(),
+            selected_note_id: None,
+            editing_note: false,
             parked_files: Vec::new(),
             next_timer_id: 3,
             next_note_id: 1,
@@ -99,13 +103,24 @@ impl ProductivityManager {
 
     pub fn add_note(&mut self, content: &str) {
         if !content.trim().is_empty() {
+            let id = self.next_note_id;
             self.notes.push(NoteItem {
-                id: self.next_note_id,
+                id,
                 content: content.trim().to_string(),
                 is_completed: false,
             });
             self.next_note_id += 1;
+            self.selected_note_id = Some(id);
             self.save_notes();
+        }
+    }
+
+    pub fn update_selected_note(&mut self, new_content: &str) {
+        if let Some(id) = self.selected_note_id {
+            if let Some(n) = self.notes.iter_mut().find(|n| n.id == id) {
+                n.content = new_content.to_string();
+                self.save_notes();
+            }
         }
     }
 

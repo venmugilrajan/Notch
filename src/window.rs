@@ -1,5 +1,8 @@
 use crate::config::AppConfig;
 use crate::modules::clipboard::ClipboardManager;
+use crate::modules::converters::ConverterState;
+use crate::modules::drop_server::DropServer;
+use crate::modules::links::LinksManager;
 use crate::modules::media::{MediaInfo, MediaWatcher};
 use crate::modules::power::{PowerNotifier, PowerStatusInfo};
 use crate::modules::productivity::ProductivityManager;
@@ -66,6 +69,9 @@ pub struct WindowContext {
     pub media_info: MediaInfo,
     pub prod_mgr: ProductivityManager,
     pub clipboard_mgr: ClipboardManager,
+    pub conv_state: ConverterState,
+    pub links_mgr: LinksManager,
+    pub drop_srv: DropServer,
     pub mem_dc: HDC,
     pub dib_bitmap: HBITMAP,
     pub dib_bits: *mut u8,
@@ -162,6 +168,9 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
             media_info: MediaInfo::default(),
             prod_mgr: ProductivityManager::new(),
             clipboard_mgr: ClipboardManager::new(clip_limit),
+            conv_state: ConverterState::new(),
+            links_mgr: LinksManager::new(),
+            drop_srv: DropServer::new(),
             mem_dc: HDC(std::ptr::null_mut()),
             dib_bitmap: HBITMAP(std::ptr::null_mut()),
             dib_bits: std::ptr::null_mut(),
@@ -288,6 +297,9 @@ fn render_and_update_layered(hwnd: HWND, ctx: &mut WindowContext) {
         &ctx.media_info,
         &ctx.prod_mgr,
         &ctx.clipboard_mgr,
+        &ctx.conv_state,
+        &ctx.links_mgr,
+        &ctx.drop_srv,
         &enabled_modules,
         time_format_24h,
         shrink_mode,
@@ -561,12 +573,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let add_btn_top = content_top + 12.0;
                 if fx >= add_btn_left && fx <= content_left + left_w - 14.0 && fy >= add_btn_top && fy <= add_btn_top + 22.0 {
                     let note_count = ctx.prod_mgr.notes.len() + 1;
-                    ctx.prod_mgr.add_note(&format!("New task or quick memo #{}", note_count));
+                    ctx.prod_mgr.add_note(&format!("Task #{} (Click 'Edit' to change text)", note_count));
                     render_and_update_layered(hwnd, ctx);
                     return LRESULT(0);
                 }
 
-                // Checkbox or note selection click
+                // Note row clicks (Select or Checkbox)
                 let mut note_y = content_top + 48.0;
                 for note in ctx.prod_mgr.notes.clone().iter().take(5) {
                     if fx >= content_left + 10.0 && fx <= content_left + left_w - 10.0 && fy >= note_y && fy <= note_y + 32.0 {
@@ -574,11 +586,46 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         if (fx - check_cx).abs() <= 12.0 {
                             // Toggle checkbox
                             ctx.prod_mgr.toggle_note(note.id);
+                        } else {
+                            // Select note
+                            ctx.prod_mgr.selected_note_id = Some(note.id);
                         }
                         render_and_update_layered(hwnd, ctx);
                         return LRESULT(0);
                     }
                     note_y += 36.0;
+                }
+
+                // Edit Button click in right pane
+                let edit_btn_left = content_right - 140.0;
+                let edit_btn_top = content_top + 12.0;
+                if fx >= edit_btn_left && fx <= content_right - 80.0 && fy >= edit_btn_top && fy <= edit_btn_top + 22.0 {
+                    let current_text = if let Some(id) = ctx.prod_mgr.selected_note_id {
+                        ctx.prod_mgr.notes.iter().find(|n| n.id == id).map(|n| n.content.clone()).unwrap_or_default()
+                    } else if let Some(first) = ctx.prod_mgr.notes.first() {
+                        first.content.clone()
+                    } else {
+                        "".to_string()
+                    };
+                    
+                    // Cycle quick prefix or update with timestamp
+                    let st = windows::Win32::System::SystemInformation::GetLocalTime();
+                    let updated = format!("{} (Updated {:02}:{:02})", current_text.split(" (Updated").next().unwrap_or(&current_text), st.wHour, st.wMinute);
+                    ctx.prod_mgr.update_selected_note(&updated);
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Delete Button click in right pane
+                let del_btn_left = content_right - 70.0;
+                let del_btn_top = content_top + 12.0;
+                if fx >= del_btn_left && fx <= content_right - 16.0 && fy >= del_btn_top && fy <= del_btn_top + 22.0 {
+                    if let Some(id) = ctx.prod_mgr.selected_note_id {
+                        ctx.prod_mgr.remove_note(id);
+                        ctx.prod_mgr.selected_note_id = ctx.prod_mgr.notes.first().map(|n| n.id);
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
                 }
             }
 
@@ -611,6 +658,70 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
             }
 
+            // Converters page interaction
+            if ctx.active_tab == NotchTab::Converters {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_left = ear_r + 14.0;
+                let fx = x as f32;
+                let fy = y as f32;
+
+                // Category tabs: Length (0), Weight (1), Temperature (2), Currency (3), Data (4)
+                let cat_w = (content_right - content_left - 48.0 - (4.0 * 8.0)) / 5.0;
+                let top_cat_y = 48.0 + 16.0;
+
+                if fy >= top_cat_y && fy <= top_cat_y + 28.0 {
+                    for i in 0..5 {
+                        let cx = content_left + 24.0 + (i as f32 * (cat_w + 8.0));
+                        if fx >= cx && fx <= cx + cat_w {
+                            ctx.conv_state.category = match i {
+                                0 => crate::modules::converters::ConverterCategory::Length,
+                                1 => crate::modules::converters::ConverterCategory::Weight,
+                                2 => crate::modules::converters::ConverterCategory::Temperature,
+                                3 => crate::modules::converters::ConverterCategory::Currency,
+                                4 => crate::modules::converters::ConverterCategory::Data,
+                                _ => crate::modules::converters::ConverterCategory::Length,
+                            };
+                            ctx.conv_state.from_unit = 0;
+                            ctx.conv_state.to_unit = 1;
+                            render_and_update_layered(hwnd, ctx);
+                            return LRESULT(0);
+                        }
+                    }
+                }
+
+                let card_top = top_cat_y + 42.0;
+                let card_w = (content_right - content_left - 48.0 - 24.0) / 2.0;
+
+                // Click left unit title to cycle FROM unit
+                if fx >= content_left + 24.0 && fx <= content_left + 24.0 + card_w && fy >= card_top && fy <= card_top + 34.0 {
+                    let units_count = ctx.conv_state.units().len();
+                    ctx.conv_state.from_unit = (ctx.conv_state.from_unit + 1) % units_count;
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Click right unit title to cycle TO unit
+                let right_x = content_left + 24.0 + card_w + 24.0;
+                if fx >= right_x && fx <= right_x + card_w && fy >= card_top && fy <= card_top + 34.0 {
+                    let units_count = ctx.conv_state.units().len();
+                    ctx.conv_state.to_unit = (ctx.conv_state.to_unit + 1) % units_count;
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Adjust chips: [-10] [-1] [+1] [+10]
+                let mut chip_x = content_left + 24.0 + 16.0;
+                let deltas = [-10.0, -1.0, 1.0, 10.0];
+                for delta in deltas.iter() {
+                    if fx >= chip_x && fx <= chip_x + 44.0 && fy >= card_top + 90.0 && fy <= card_top + 118.0 {
+                        ctx.conv_state.input_value = (ctx.conv_state.input_value + delta).max(0.0);
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                    chip_x += 52.0;
+                }
+            }
+
             // Links page interaction
             if ctx.active_tab == NotchTab::Links {
                 let ear_r = 14.0 + (ctx.animation_progress * 6.0);
@@ -618,21 +729,53 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let fx = x as f32;
                 let fy = y as f32;
 
+                // "+ Add Link" button click
+                let add_btn_left = content_right - 110.0;
+                let add_btn_top = 48.0 + 14.0;
+                if fx >= add_btn_left && fx <= content_right - 24.0 && fy >= add_btn_top && fy <= add_btn_top + 22.0 {
+                    let clip_text = ctx.clipboard_mgr.items.first().map(|i| i.text.clone()).unwrap_or_default();
+                    let (title, url) = if clip_text.starts_with("http") {
+                        ("My Link".to_string(), clip_text)
+                    } else {
+                        let cnt = ctx.links_mgr.links.len() + 1;
+                        (format!("Custom Link #{}", cnt), "https://google.com".to_string())
+                    };
+                    ctx.links_mgr.add_link(title, url, "Quick Bookmark".to_string());
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Engine chips clicks
+                let mut cur_chip_x = content_left + 24.0;
                 let chip_y = 48.0 + 46.0;
+                if fy >= chip_y && fy <= chip_y + 28.0 {
+                    for i in 0..5 {
+                        if fx >= cur_chip_x && fx <= cur_chip_x + 90.0 {
+                            ctx.links_mgr.selected_engine_index = i;
+                            render_and_update_layered(hwnd, ctx);
+                            return LRESULT(0);
+                        }
+                        cur_chip_x += 98.0;
+                    }
+                }
+
+                // Bookmarks tiles clicks & delete
                 let b_top = chip_y + 42.0;
-                let tile_w = (content_right - content_left - 48.0 - 36.0) / 4.0;
+                let max_display = 4.min(ctx.links_mgr.links.len().max(1));
+                let tile_w = (content_right - content_left - 48.0 - (12.0 * (max_display as f32 - 1.0))) / (max_display as f32);
 
-                let bookmarks = [
-                    "https://github.com",
-                    "https://youtube.com",
-                    "https://google.com",
-                    "https://chatgpt.com",
-                ];
-
-                for (i, url) in bookmarks.iter().enumerate() {
+                for (i, link) in ctx.links_mgr.links.clone().iter().take(4).enumerate() {
                     let bx = content_left + 24.0 + (i as f32 * (tile_w + 12.0));
                     if fx >= bx && fx <= bx + tile_w && fy >= b_top && fy <= b_top + 90.0 {
-                        let url_w: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+                        // Check if delete "x" clicked
+                        if fx >= bx + tile_w - 24.0 && fy <= b_top + 24.0 {
+                            ctx.links_mgr.remove_link(link.id);
+                            render_and_update_layered(hwnd, ctx);
+                            return LRESULT(0);
+                        }
+
+                        // Otherwise open URL
+                        let url_w: Vec<u16> = link.url.encode_utf16().chain(std::iter::once(0)).collect();
                         unsafe {
                             windows::Win32::UI::Shell::ShellExecuteW(
                                 hwnd,
@@ -645,6 +788,30 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         }
                         return LRESULT(0);
                     }
+                }
+            }
+
+            // Drop page interaction
+            if ctx.active_tab == NotchTab::DropTransfer {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_left = ear_r + 14.0;
+                let half_w = (content_right - content_left - 48.0 - 24.0) / 2.0;
+                let right_x = content_left + 24.0 + half_w + 24.0;
+                let fx = x as f32;
+                let fy = y as f32;
+
+                // Start/Stop Server Button
+                let srv_btn_left = right_x + 16.0;
+                let srv_btn_top = 48.0 + 24.0 + 44.0;
+                if fx >= srv_btn_left && fx <= srv_btn_left + 134.0 && fy >= srv_btn_top && fy <= srv_btn_top + 30.0 {
+                    let is_running = ctx.drop_srv.is_running.load(std::sync::atomic::Ordering::SeqCst);
+                    if is_running {
+                        ctx.drop_srv.stop();
+                    } else {
+                        ctx.drop_srv.start(ctx.prod_mgr.parked_files.clone());
+                    }
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
                 }
             }
 

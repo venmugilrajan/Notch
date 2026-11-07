@@ -1,4 +1,7 @@
 pub mod clipboard;
+pub mod converters;
+pub mod drop_server;
+pub mod links;
 pub mod media;
 pub mod notifications;
 pub mod power;
