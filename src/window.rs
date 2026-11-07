@@ -888,13 +888,15 @@ fn handle_animation_tick(hwnd: HWND, ctx: &mut WindowContext) {
 
 fn check_fullscreen_state(hwnd: HWND) {
     unsafe {
-        let state = SHQueryUserNotificationState();
-        if let Ok(state_val) = state {
-            if state_val.0 == 2 || state_val.0 == 3 {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-            } else {
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            }
-        }
+        // Ensure window always stays on top (HWND_TOPMOST)
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
     }
 }
