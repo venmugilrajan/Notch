@@ -439,6 +439,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         let x = (lparam.0 & 0xFFFF) as i32;
         let y = ((lparam.0 >> 16) & 0xFFFF) as i32;
 
+        unsafe {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+        }
+
         if ctx.state == NotchState::Expanded {
             let ear_r = 14.0 + (ctx.animation_progress * 6.0);
             let content_right = ctx.current_w as f32 - ear_r - 14.0;
@@ -606,9 +610,26 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         ctx.prod_mgr.save_editing();
                     } else {
                         ctx.prod_mgr.start_editing();
+                        unsafe {
+                            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+                        }
                     }
                     render_and_update_layered(hwnd, ctx);
                     return LRESULT(0);
+                }
+
+                // Click inside the note content area to also start editing
+                let content_box_left = content_left + left_w + 12.0;
+                let content_box_top = content_top + 40.0;
+                if fx >= content_box_left && fx <= content_right && fy >= content_box_top && fy <= ctx.current_h as f32 - 60.0 {
+                    if !ctx.prod_mgr.editing_note {
+                        ctx.prod_mgr.start_editing();
+                        unsafe {
+                            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+                        }
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
                 }
 
                 // Delete / Cancel Button click in right pane
@@ -688,7 +709,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
 
-                let card_top = top_cat_y + 42.0;
+                let card_top = top_cat_y + 36.0;
                 let card_w = (content_right - content_left - 48.0 - 24.0) / 2.0;
 
                 // Click left unit title to cycle FROM unit
@@ -708,35 +729,54 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     return LRESULT(0);
                 }
 
-                // In-build Calculator Keypad interaction
-                let pad_btn_w = (card_w - 32.0 - (6.0 * 3.0)) / 7.0;
-                let pad_btn_h = 24.0;
-                let ky1 = card_top + 72.0;
-                let ky2 = ky1 + pad_btn_h + 4.0;
+                // 4-Column Calculator Keypad interaction
+                let key_w = (card_w - 32.0 - (3.0 * 6.0)) / 4.0;
+                let key_h = 24.0;
+                let k_gap = 4.0;
+                let pad_top = card_top + 54.0;
 
-                // Row 1: ['7', '8', '9', '4', '5', '6', 'C']
-                if fy >= ky1 && fy <= ky1 + pad_btn_h {
-                    let mut kx = content_left + 24.0 + 16.0;
-                    for &k in &['7', '8', '9', '4', '5', '6', 'C'] {
-                        if fx >= kx && fx <= kx + pad_btn_w {
-                            ctx.conv_state.push_digit(k);
-                            render_and_update_layered(hwnd, ctx);
-                            return LRESULT(0);
+                let keypad_layout: [[char; 4]; 4] = [
+                    ['C', 'S', 'B', 'D'],
+                    ['7', '8', '9', 'M'],
+                    ['4', '5', '6', 'U'],
+                    ['1', '2', '3', 'A'],
+                ];
+
+                for (row_idx, row) in keypad_layout.iter().enumerate() {
+                    let ky = pad_top + (row_idx as f32 * (key_h + k_gap));
+                    if fy >= ky && fy <= ky + key_h {
+                        for (col_idx, &k_char) in row.iter().enumerate() {
+                            let kx = content_left + 24.0 + 16.0 + (col_idx as f32 * (key_w + 6.0));
+                            if fx >= kx && fx <= kx + key_w {
+                                ctx.conv_state.push_digit(k_char);
+                                render_and_update_layered(hwnd, ctx);
+                                return LRESULT(0);
+                            }
                         }
-                        kx += pad_btn_w + 3.0;
                     }
                 }
 
-                // Row 2: ['1', '2', '3', '0', '.', 'S', 'B'] (S = +/-, B = backspace)
-                if fy >= ky2 && fy <= ky2 + pad_btn_h {
-                    let mut kx = content_left + 24.0 + 16.0;
-                    for &k in &['1', '2', '3', '0', '.', 'S', 'B'] {
-                        if fx >= kx && fx <= kx + pad_btn_w {
-                            ctx.conv_state.push_digit(k);
-                            render_and_update_layered(hwnd, ctx);
-                            return LRESULT(0);
-                        }
-                        kx += pad_btn_w + 3.0;
+                // Bottom row: 0, ., =
+                let ky_bottom = pad_top + (4.0 * (key_h + k_gap));
+                if fy >= ky_bottom && fy <= ky_bottom + key_h {
+                    let zero_w = (key_w * 2.0) + 6.0;
+                    let zero_x = content_left + 24.0 + 16.0;
+                    if fx >= zero_x && fx <= zero_x + zero_w {
+                        ctx.conv_state.push_digit('0');
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                    let dot_x = zero_x + zero_w + 6.0;
+                    if fx >= dot_x && fx <= dot_x + key_w {
+                        ctx.conv_state.push_digit('.');
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                    let eq_x = dot_x + key_w + 6.0;
+                    if fx >= eq_x && fx <= eq_x + key_w {
+                        // equals/convert (already reactive)
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
                     }
                 }
             }

@@ -31,11 +31,11 @@ impl ConverterState {
 
     pub fn units(&self) -> Vec<&'static str> {
         match self.category {
-            ConverterCategory::Length => vec!["Meters (m)", "Feet (ft)", "Inches (in)", "Kilometers (km)", "Miles (mi)"],
-            ConverterCategory::Weight => vec!["Kilograms (kg)", "Pounds (lbs)", "Grams (g)", "Ounces (oz)"],
+            ConverterCategory::Length => vec!["Meters (m)", "Kilometers (km)", "Centimeters (cm)", "Millimeters (mm)", "Feet (ft)", "Inches (in)", "Yards (yd)", "Miles (mi)"],
+            ConverterCategory::Weight => vec!["Kilograms (kg)", "Grams (g)", "Pounds (lbs)", "Ounces (oz)", "Milligrams (mg)", "Metric Tons (t)"],
             ConverterCategory::Temperature => vec!["Celsius (°C)", "Fahrenheit (°F)", "Kelvin (K)"],
-            ConverterCategory::Currency => vec!["USD ($)", "EUR (€)", "INR (₹)", "GBP (£)", "JPY (¥)"],
-            ConverterCategory::Data => vec!["Megabytes (MB)", "Gigabytes (GB)", "Kilobytes (KB)", "Terabytes (TB)"],
+            ConverterCategory::Currency => vec!["USD ($)", "EUR (€)", "INR (₹)", "GBP (£)", "JPY (¥)", "CAD ($)", "AUD ($)", "CNY (¥)"],
+            ConverterCategory::Data => vec!["Megabytes (MB)", "Gigabytes (GB)", "Kilobytes (KB)", "Terabytes (TB)", "Bytes (B)", "Petabytes (PB)"],
         }
     }
 
@@ -80,43 +80,53 @@ impl ConverterState {
         match self.category {
             ConverterCategory::Length => {
                 let meters = match self.from_unit {
-                    0 => val,
-                    1 => val * 0.3048,
-                    2 => val * 0.0254,
-                    3 => val * 1000.0,
-                    4 => val * 1609.34,
+                    0 => val,                 // Meters
+                    1 => val * 1000.0,        // Kilometers
+                    2 => val * 0.01,          // Centimeters
+                    3 => val * 0.001,         // Millimeters
+                    4 => val * 0.3048,        // Feet
+                    5 => val * 0.0254,        // Inches
+                    6 => val * 0.9144,        // Yards
+                    7 => val * 1609.344,      // Miles
                     _ => val,
                 };
                 let result = match self.to_unit {
                     0 => meters,
-                    1 => meters / 0.3048,
-                    2 => meters / 0.0254,
-                    3 => meters / 1000.0,
-                    4 => meters / 1609.34,
+                    1 => meters / 1000.0,
+                    2 => meters / 0.01,
+                    3 => meters / 0.001,
+                    4 => meters / 0.3048,
+                    5 => meters / 0.0254,
+                    6 => meters / 0.9144,
+                    7 => meters / 1609.344,
                     _ => meters,
                 };
                 let unit_label = match self.to_unit {
-                    0 => "m", 1 => "ft", 2 => "in", 3 => "km", 4 => "mi", _ => "",
+                    0 => "m", 1 => "km", 2 => "cm", 3 => "mm", 4 => "ft", 5 => "in", 6 => "yd", 7 => "mi", _ => "",
                 };
                 (result, unit_label)
             }
             ConverterCategory::Weight => {
                 let kg = match self.from_unit {
-                    0 => val,
-                    1 => val * 0.453592,
-                    2 => val / 1000.0,
-                    3 => val * 0.0283495,
+                    0 => val,                 // kg
+                    1 => val / 1000.0,        // g
+                    2 => val * 0.45359237,    // lbs
+                    3 => val * 0.0283495,     // oz
+                    4 => val / 1_000_000.0,   // mg
+                    5 => val * 1000.0,        // metric tons
                     _ => val,
                 };
                 let result = match self.to_unit {
                     0 => kg,
-                    1 => kg / 0.453592,
-                    2 => kg * 1000.0,
+                    1 => kg * 1000.0,
+                    2 => kg / 0.45359237,
                     3 => kg / 0.0283495,
+                    4 => kg * 1_000_000.0,
+                    5 => kg / 1000.0,
                     _ => kg,
                 };
                 let unit_label = match self.to_unit {
-                    0 => "kg", 1 => "lbs", 2 => "g", 3 => "oz", _ => "",
+                    0 => "kg", 1 => "g", 2 => "lbs", 3 => "oz", 4 => "mg", 5 => "t", _ => "",
                 };
                 (result, unit_label)
             }
@@ -145,6 +155,9 @@ impl ConverterState {
                     2 => val / 84.5,
                     3 => val / 0.78,
                     4 => val / 152.0,
+                    5 => val / 1.35,
+                    6 => val / 1.50,
+                    7 => val / 7.20,
                     _ => val,
                 };
                 let result = match self.to_unit {
@@ -153,19 +166,24 @@ impl ConverterState {
                     2 => usd * 84.5,
                     3 => usd * 0.78,
                     4 => usd * 152.0,
+                    5 => usd * 1.35,
+                    6 => usd * 1.50,
+                    7 => usd * 7.20,
                     _ => usd,
                 };
                 let unit_label = match self.to_unit {
-                    0 => "USD", 1 => "EUR", 2 => "INR", 3 => "GBP", 4 => "JPY", _ => "",
+                    0 => "USD", 1 => "EUR", 2 => "INR", 3 => "GBP", 4 => "JPY", 5 => "CAD", 6 => "AUD", 7 => "CNY", _ => "",
                 };
                 (result, unit_label)
             }
             ConverterCategory::Data => {
                 let mb = match self.from_unit {
-                    0 => val,
-                    1 => val * 1024.0,
-                    2 => val / 1024.0,
-                    3 => val * 1024.0 * 1024.0,
+                    0 => val,                             // MB
+                    1 => val * 1024.0,                    // GB
+                    2 => val / 1024.0,                    // KB
+                    3 => val * 1024.0 * 1024.0,           // TB
+                    4 => val / (1024.0 * 1024.0),         // B
+                    5 => val * 1024.0 * 1024.0 * 1024.0,  // PB
                     _ => val,
                 };
                 let result = match self.to_unit {
@@ -173,10 +191,12 @@ impl ConverterState {
                     1 => mb / 1024.0,
                     2 => mb * 1024.0,
                     3 => mb / (1024.0 * 1024.0),
+                    4 => mb * 1024.0 * 1024.0,
+                    5 => mb / (1024.0 * 1024.0 * 1024.0),
                     _ => mb,
                 };
                 let unit_label = match self.to_unit {
-                    0 => "MB", 1 => "GB", 2 => "KB", 3 => "TB", _ => "",
+                    0 => "MB", 1 => "GB", 2 => "KB", 3 => "TB", 4 => "B", 5 => "PB", _ => "",
                 };
                 (result, unit_label)
             }

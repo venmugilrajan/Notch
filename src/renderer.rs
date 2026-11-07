@@ -2698,9 +2698,9 @@ impl D2DRenderer {
         }
 
         // Two Main Converter Cards: Input & Keypad (Left) and Converted Output (Right)
-        let card_top = top_cat_y + 42.0;
+        let card_top = top_cat_y + 36.0;
         let card_w = (rect.right - rect.left - 48.0 - 24.0) / 2.0;
-        let card_h = 136.0;
+        let card_h = rect.bottom - card_top - 12.0;
 
         // Left: Calculator Input Card with built-in Number Display & Keypad
         let left_r = D2D1_ROUNDED_RECT {
@@ -2747,49 +2747,90 @@ impl D2DRenderer {
             target.DrawText(&wide, nfmt, &vr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
-        // Full In-build Calculator Keypad Row: [7] [8] [9] [4] [5] [6] [1] [2] [3] [0] [.] [C] [⌫]
-        let pad_keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", "0", ".", "C", "⌫"];
-        let pad_btn_w = (card_w - 32.0 - (6.0 * 3.0)) / 7.0;
-        let pad_btn_h = 24.0;
+        // Standard 4-Column Calculator Keypad
+        let key_w = (card_w - 32.0 - (3.0 * 6.0)) / 4.0;
+        let key_h = 24.0;
+        let k_gap = 4.0;
+        let pad_top = card_top + 54.0;
 
-        // Row 1: 7, 8, 9, 4, 5, 6, C
-        let mut kx = left_r.rect.left + 16.0;
-        let ky1 = card_top + 72.0;
-        for &k in &["7", "8", "9", "4", "5", "6", "C"] {
-            let kr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: kx, top: ky1, right: kx + pad_btn_w, bottom: ky1 + pad_btn_h },
-                radiusX: 4.0,
-                radiusY: 4.0,
-            };
-            let k_bg = target.CreateSolidColorBrush(if k == "C" { &D2D1_COLOR_F { r: 0.22, g: 0.12, b: 0.12, a: 1.0 } } else { &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 } }, None)?;
-            target.FillRoundedRectangle(&kr, &k_bg);
-            target.DrawRoundedRectangle(&kr, card_border, 1.0, None);
-            if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = k.encode_utf16().collect();
-                let tr = D2D_RECT_F { left: kx, top: ky1 + 4.0, right: kx + pad_btn_w, bottom: ky1 + pad_btn_h };
-                target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        let keypad_rows: [[(&str, &str); 4]; 4] = [
+            [("C", "action"), ("±", "action"), ("⌫", "action"), ("÷", "accent")],
+            [("7", "num"), ("8", "num"), ("9", "num"), ("×", "accent")],
+            [("4", "num"), ("5", "num"), ("6", "num"), ("-", "accent")],
+            [("1", "num"), ("2", "num"), ("3", "num"), ("+", "accent")],
+        ];
+
+        for (row_idx, row) in keypad_rows.iter().enumerate() {
+            let ky = pad_top + (row_idx as f32 * (key_h + k_gap));
+            for (col_idx, &(k_text, k_type)) in row.iter().enumerate() {
+                let kx = left_r.rect.left + 16.0 + (col_idx as f32 * (key_w + 6.0));
+                let kr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left: kx, top: ky, right: kx + key_w, bottom: ky + key_h },
+                    radiusX: 5.0,
+                    radiusY: 5.0,
+                };
+                let k_brush = match k_type {
+                    "action" => target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.22, g: 0.16, b: 0.16, a: 1.0 }, None)?,
+                    "accent" => target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.25, g: 0.15, b: 0.10, a: 1.0 }, None)?,
+                    _ => target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.16, g: 0.16, b: 0.20, a: 1.0 }, None)?,
+                };
+                target.FillRoundedRectangle(&kr, &k_brush);
+                target.DrawRoundedRectangle(&kr, card_border, 1.0, None);
+
+                if let Ok(mfmt) = self.get_meta_format() {
+                    let wide: Vec<u16> = k_text.encode_utf16().collect();
+                    let tr = D2D_RECT_F { left: kx, top: ky + 4.0, right: kx + key_w, bottom: ky + key_h };
+                    let text_brush = if k_type == "accent" { accent } else { white };
+                    target.DrawText(&wide, mfmt, &tr, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                }
             }
-            kx += pad_btn_w + 3.0;
         }
 
-        // Row 2: 1, 2, 3, 0, ., ±, ⌫
-        let mut kx2 = left_r.rect.left + 16.0;
-        let ky2 = ky1 + pad_btn_h + 4.0;
-        for &k in &["1", "2", "3", "0", ".", "±", "⌫"] {
-            let kr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: kx2, top: ky2, right: kx2 + pad_btn_w, bottom: ky2 + pad_btn_h },
-                radiusX: 4.0,
-                radiusY: 4.0,
-            };
-            let k_bg = target.CreateSolidColorBrush(if k == "⌫" { &D2D1_COLOR_F { r: 0.22, g: 0.16, b: 0.12, a: 1.0 } } else { &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 } }, None)?;
-            target.FillRoundedRectangle(&kr, &k_bg);
-            target.DrawRoundedRectangle(&kr, card_border, 1.0, None);
-            if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = k.encode_utf16().collect();
-                let tr = D2D_RECT_F { left: kx2, top: ky2 + 4.0, right: kx2 + pad_btn_w, bottom: ky2 + pad_btn_h };
-                target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
-            kx2 += pad_btn_w + 3.0;
+        // Bottom row for 0 and .
+        let ky_bottom = pad_top + (4.0 * (key_h + k_gap));
+        // 0 key spans 2 columns
+        let zero_w = (key_w * 2.0) + 6.0;
+        let kr_zero = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: left_r.rect.left + 16.0, top: ky_bottom, right: left_r.rect.left + 16.0 + zero_w, bottom: ky_bottom + key_h },
+            radiusX: 5.0,
+            radiusY: 5.0,
+        };
+        let num_brush = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.16, g: 0.16, b: 0.20, a: 1.0 }, None)?;
+        target.FillRoundedRectangle(&kr_zero, &num_brush);
+        target.DrawRoundedRectangle(&kr_zero, card_border, 1.0, None);
+        if let Ok(mfmt) = self.get_meta_format() {
+            let wide: Vec<u16> = "0".encode_utf16().collect();
+            let tr = D2D_RECT_F { left: kr_zero.rect.left, top: ky_bottom + 4.0, right: kr_zero.rect.right, bottom: ky_bottom + key_h };
+            target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // . key
+        let dot_x = left_r.rect.left + 16.0 + zero_w + 6.0;
+        let kr_dot = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: dot_x, top: ky_bottom, right: dot_x + key_w, bottom: ky_bottom + key_h },
+            radiusX: 5.0,
+            radiusY: 5.0,
+        };
+        target.FillRoundedRectangle(&kr_dot, &num_brush);
+        target.DrawRoundedRectangle(&kr_dot, card_border, 1.0, None);
+        if let Ok(mfmt) = self.get_meta_format() {
+            let wide: Vec<u16> = ".".encode_utf16().collect();
+            let tr = D2D_RECT_F { left: dot_x, top: ky_bottom + 4.0, right: dot_x + key_w, bottom: ky_bottom + key_h };
+            target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // = / Convert key
+        let eq_x = dot_x + key_w + 6.0;
+        let kr_eq = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: eq_x, top: ky_bottom, right: eq_x + key_w, bottom: ky_bottom + key_h },
+            radiusX: 5.0,
+            radiusY: 5.0,
+        };
+        target.FillRoundedRectangle(&kr_eq, accent);
+        if let Ok(mfmt) = self.get_meta_format() {
+            let wide: Vec<u16> = "=".encode_utf16().collect();
+            let tr = D2D_RECT_F { left: eq_x, top: ky_bottom + 4.0, right: eq_x + key_w, bottom: ky_bottom + key_h };
+            target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         // Right: Converted Result Card
