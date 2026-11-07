@@ -709,16 +709,36 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     return LRESULT(0);
                 }
 
-                // Adjust chips: [-10] [-1] [+1] [+10]
-                let mut chip_x = content_left + 24.0 + 16.0;
-                let deltas = [-10.0, -1.0, 1.0, 10.0];
-                for delta in deltas.iter() {
-                    if fx >= chip_x && fx <= chip_x + 44.0 && fy >= card_top + 90.0 && fy <= card_top + 118.0 {
-                        ctx.conv_state.input_value = (ctx.conv_state.input_value + delta).max(0.0);
-                        render_and_update_layered(hwnd, ctx);
-                        return LRESULT(0);
+                // In-build Calculator Keypad interaction
+                let pad_btn_w = (card_w - 32.0 - (6.0 * 3.0)) / 7.0;
+                let pad_btn_h = 24.0;
+                let ky1 = card_top + 72.0;
+                let ky2 = ky1 + pad_btn_h + 4.0;
+
+                // Row 1: ['7', '8', '9', '4', '5', '6', 'C']
+                if fy >= ky1 && fy <= ky1 + pad_btn_h {
+                    let mut kx = content_left + 24.0 + 16.0;
+                    for &k in &['7', '8', '9', '4', '5', '6', 'C'] {
+                        if fx >= kx && fx <= kx + pad_btn_w {
+                            ctx.conv_state.push_digit(k);
+                            render_and_update_layered(hwnd, ctx);
+                            return LRESULT(0);
+                        }
+                        kx += pad_btn_w + 3.0;
                     }
-                    chip_x += 52.0;
+                }
+
+                // Row 2: ['1', '2', '3', '0', '.', 'S', 'B'] (S = +/-, B = backspace)
+                if fy >= ky2 && fy <= ky2 + pad_btn_h {
+                    let mut kx = content_left + 24.0 + 16.0;
+                    for &k in &['1', '2', '3', '0', '.', 'S', 'B'] {
+                        if fx >= kx && fx <= kx + pad_btn_w {
+                            ctx.conv_state.push_digit(k);
+                            render_and_update_layered(hwnd, ctx);
+                            return LRESULT(0);
+                        }
+                        kx += pad_btn_w + 3.0;
+                    }
                 }
             }
 

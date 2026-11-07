@@ -10,7 +10,7 @@ pub enum ConverterCategory {
 #[derive(Clone, Debug)]
 pub struct ConverterState {
     pub category: ConverterCategory,
-    pub input_value: f64,
+    pub input_str: String,
     pub from_unit: usize,
     pub to_unit: usize,
 }
@@ -19,7 +19,7 @@ impl ConverterState {
     pub fn new() -> Self {
         Self {
             category: ConverterCategory::Length,
-            input_value: 1.0,
+            input_str: "10".to_string(),
             from_unit: 0,
             to_unit: 1,
         }
@@ -39,11 +39,46 @@ impl ConverterState {
         }
     }
 
+    pub fn push_digit(&mut self, ch: char) {
+        if ch == '.' {
+            if !self.input_str.contains('.') {
+                if self.input_str.is_empty() {
+                    self.input_str.push('0');
+                }
+                self.input_str.push('.');
+            }
+        } else if ch == 'C' {
+            self.input_str = "0".to_string();
+        } else if ch == 'B' { // backspace
+            if !self.input_str.is_empty() {
+                self.input_str.pop();
+            }
+            if self.input_str.is_empty() {
+                self.input_str = "0".to_string();
+            }
+        } else if ch == 'S' { // sign +/-
+            if self.input_str.starts_with('-') {
+                self.input_str.remove(0);
+            } else if self.input_str != "0" {
+                self.input_str.insert(0, '-');
+            }
+        } else if ch.is_ascii_digit() {
+            if self.input_str == "0" {
+                self.input_str = ch.to_string();
+            } else if self.input_str.len() < 12 {
+                self.input_str.push(ch);
+            }
+        }
+    }
+
+    pub fn parsed_value(&self) -> f64 {
+        self.input_str.parse::<f64>().unwrap_or(0.0)
+    }
+
     pub fn convert(&self) -> (f64, &'static str) {
-        let val = self.input_value;
+        let val = self.parsed_value();
         match self.category {
             ConverterCategory::Length => {
-                // Base: meters
                 let meters = match self.from_unit {
                     0 => val,
                     1 => val * 0.3048,
@@ -66,7 +101,6 @@ impl ConverterState {
                 (result, unit_label)
             }
             ConverterCategory::Weight => {
-                // Base: kg
                 let kg = match self.from_unit {
                     0 => val,
                     1 => val * 0.453592,
@@ -105,7 +139,6 @@ impl ConverterState {
                 (result, unit_label)
             }
             ConverterCategory::Currency => {
-                // Base: USD
                 let usd = match self.from_unit {
                     0 => val,
                     1 => val / 0.92,
@@ -128,7 +161,6 @@ impl ConverterState {
                 (result, unit_label)
             }
             ConverterCategory::Data => {
-                // Base: MB
                 let mb = match self.from_unit {
                     0 => val,
                     1 => val * 1024.0,

@@ -79,3 +79,4 @@ impl LinksManager {
         self.save_links();
     }
 }
+

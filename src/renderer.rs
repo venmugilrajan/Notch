@@ -2658,12 +2658,12 @@ impl D2DRenderer {
             }
         }
 
-        // Two Big Converter Cards: Input Card (Left) and Converted Output Card (Right)
+        // Two Main Converter Cards: Input & Keypad (Left) and Converted Output (Right)
         let card_top = top_cat_y + 42.0;
         let card_w = (rect.right - rect.left - 48.0 - 24.0) / 2.0;
         let card_h = 136.0;
 
-        // Left: Input Card
+        // Left: Calculator Input Card with built-in Number Display & Keypad
         let left_r = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: rect.left + 24.0,
@@ -2685,56 +2685,72 @@ impl D2DRenderer {
         let from_unit_name = units.get(conv.from_unit).unwrap_or(&"From Unit");
 
         if let Ok(mfmt) = self.get_meta_format() {
-            let label = format!("FROM: {} (CLICK UNIT TO SWITCH)", from_unit_name.to_uppercase());
+            let label = format!("FROM: {} ⌄ (CLICK TO CYCLE UNIT)", from_unit_name.to_uppercase());
             let wide: Vec<u16> = label.encode_utf16().collect();
             let lr = D2D_RECT_F {
                 left: left_r.rect.left + 16.0,
-                top: card_top + 14.0,
+                top: card_top + 10.0,
                 right: left_r.rect.right - 16.0,
-                bottom: card_top + 32.0,
+                bottom: card_top + 26.0,
             };
             target.DrawText(&wide, mfmt, &lr, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         if let Ok(nfmt) = self.get_number_format() {
-            let val_str = format!("{:.2}", conv.input_value);
+            let val_str = &conv.input_str;
             let wide: Vec<u16> = val_str.encode_utf16().collect();
             let vr = D2D_RECT_F {
                 left: left_r.rect.left + 16.0,
-                top: card_top + 40.0,
+                top: card_top + 28.0,
                 right: left_r.rect.right - 16.0,
-                bottom: card_top + 80.0,
+                bottom: card_top + 58.0,
             };
             target.DrawText(&wide, nfmt, &vr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
-        // Quick adjust chips: [-10] [-1] [+1] [+10]
-        let adjust_chips = ["-10", "-1", "+1", "+10"];
-        let mut chip_x = left_r.rect.left + 16.0;
-        for c in adjust_chips.iter() {
-            let cr = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: chip_x,
-                    top: card_top + 90.0,
-                    right: chip_x + 44.0,
-                    bottom: card_top + 118.0,
-                },
-                radiusX: 6.0,
-                radiusY: 6.0,
+        // Full In-build Calculator Keypad Row: [7] [8] [9] [4] [5] [6] [1] [2] [3] [0] [.] [C] [⌫]
+        let pad_keys = ["7", "8", "9", "4", "5", "6", "1", "2", "3", "0", ".", "C", "⌫"];
+        let pad_btn_w = (card_w - 32.0 - (6.0 * 3.0)) / 7.0;
+        let pad_btn_h = 24.0;
+
+        // Row 1: 7, 8, 9, 4, 5, 6, C
+        let mut kx = left_r.rect.left + 16.0;
+        let ky1 = card_top + 72.0;
+        for &k in &["7", "8", "9", "4", "5", "6", "C"] {
+            let kr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F { left: kx, top: ky1, right: kx + pad_btn_w, bottom: ky1 + pad_btn_h },
+                radiusX: 4.0,
+                radiusY: 4.0,
             };
-            target.FillRoundedRectangle(&cr, card_bg);
-            target.DrawRoundedRectangle(&cr, card_border, 1.0, None);
+            let k_bg = target.CreateSolidColorBrush(if k == "C" { &D2D1_COLOR_F { r: 0.22, g: 0.12, b: 0.12, a: 1.0 } } else { &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 } }, None)?;
+            target.FillRoundedRectangle(&kr, &k_bg);
+            target.DrawRoundedRectangle(&kr, card_border, 1.0, None);
             if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = c.encode_utf16().collect();
-                let txt_r = D2D_RECT_F {
-                    left: chip_x + 8.0,
-                    top: card_top + 95.0,
-                    right: chip_x + 40.0,
-                    bottom: card_top + 116.0,
-                };
-                target.DrawText(&wide, mfmt, &txt_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                let wide: Vec<u16> = k.encode_utf16().collect();
+                let tr = D2D_RECT_F { left: kx, top: ky1 + 4.0, right: kx + pad_btn_w, bottom: ky1 + pad_btn_h };
+                target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
-            chip_x += 52.0;
+            kx += pad_btn_w + 3.0;
+        }
+
+        // Row 2: 1, 2, 3, 0, ., ±, ⌫
+        let mut kx2 = left_r.rect.left + 16.0;
+        let ky2 = ky1 + pad_btn_h + 4.0;
+        for &k in &["1", "2", "3", "0", ".", "±", "⌫"] {
+            let kr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F { left: kx2, top: ky2, right: kx2 + pad_btn_w, bottom: ky2 + pad_btn_h },
+                radiusX: 4.0,
+                radiusY: 4.0,
+            };
+            let k_bg = target.CreateSolidColorBrush(if k == "⌫" { &D2D1_COLOR_F { r: 0.22, g: 0.16, b: 0.12, a: 1.0 } } else { &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 } }, None)?;
+            target.FillRoundedRectangle(&kr, &k_bg);
+            target.DrawRoundedRectangle(&kr, card_border, 1.0, None);
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = k.encode_utf16().collect();
+                let tr = D2D_RECT_F { left: kx2, top: ky2 + 4.0, right: kx2 + pad_btn_w, bottom: ky2 + pad_btn_h };
+                target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            kx2 += pad_btn_w + 3.0;
         }
 
         // Right: Converted Result Card
@@ -3106,22 +3122,75 @@ impl D2DRenderer {
             target.DrawText(&wide, bfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
-        // Phone connection URL
-        if let Ok(sfmt) = self.get_sub_format() {
-            let url_text = if is_running {
-                format!("Phone URL: {}", drop_srv.url())
-            } else {
-                "Connect to the same Wi-Fi and open the URL on your mobile browser.".to_string()
+        // Render QR Code vector squares on white card
+        if is_running {
+            let qr_size = 100.0;
+            let qr_x = right_x + 16.0;
+            let qr_y = right_r.rect.top + 84.0;
+            let qr_bg_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: qr_x,
+                    top: qr_y,
+                    right: qr_x + qr_size,
+                    bottom: qr_y + qr_size,
+                },
+                radiusX: 8.0,
+                radiusY: 8.0,
             };
-            let wide: Vec<u16> = url_text.encode_utf16().collect();
+            target.FillRoundedRectangle(&qr_bg_r, white);
+
+            if let Some(matrix) = drop_srv.generate_qr_matrix() {
+                let n = matrix.len();
+                if n > 0 {
+                    let cell_w = (qr_size - 12.0) / (n as f32);
+                    let q_dark = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.05, g: 0.05, b: 0.05, a: 1.0 }, None)?;
+                    for (row, r_vec) in matrix.iter().enumerate() {
+                        for (col, &is_dark) in r_vec.iter().enumerate() {
+                            if is_dark {
+                                let c_rect = D2D_RECT_F {
+                                    left: qr_x + 6.0 + (col as f32 * cell_w),
+                                    top: qr_y + 6.0 + (row as f32 * cell_w),
+                                    right: qr_x + 6.0 + ((col + 1) as f32 * cell_w),
+                                    bottom: qr_y + 6.0 + ((row + 1) as f32 * cell_w),
+                                };
+                                target.FillRectangle(&c_rect, &q_dark);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // QR Scan instruction
+            if let Ok(bfmt) = self.get_body_format() {
+                let wide: Vec<u16> = "Scan with your phone camera".encode_utf16().collect();
+                let ir = D2D_RECT_F {
+                    left: qr_x + qr_size + 16.0,
+                    top: qr_y + 14.0,
+                    right: right_r.rect.right - 16.0,
+                    bottom: qr_y + 40.0,
+                };
+                target.DrawText(&wide, bfmt, &ir, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            if let Ok(sfmt) = self.get_sub_format() {
+                let sub_str = format!("Same Wi-Fi network · URL: {}", drop_srv.url());
+                let wide: Vec<u16> = sub_str.encode_utf16().collect();
+                let sr = D2D_RECT_F {
+                    left: qr_x + qr_size + 16.0,
+                    top: qr_y + 42.0,
+                    right: right_r.rect.right - 16.0,
+                    bottom: qr_y + 90.0,
+                };
+                target.DrawText(&wide, sfmt, &sr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        } else if let Ok(sfmt) = self.get_sub_format() {
+            let wide: Vec<u16> = "Click 'Start Server' to generate a QR code and share files with your phone over Wi-Fi.".encode_utf16().collect();
             let ur = D2D_RECT_F {
                 left: right_x + 16.0,
                 top: right_r.rect.top + 84.0,
                 right: right_r.rect.right - 16.0,
-                bottom: right_r.rect.top + 130.0,
+                bottom: right_r.rect.top + 140.0,
             };
-            let brush = if is_running { white } else { secondary };
-            target.DrawText(&wide, sfmt, &ur, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            target.DrawText(&wide, sfmt, &ur, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         Ok(())

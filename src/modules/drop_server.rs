@@ -1,3 +1,4 @@
+use qrcode::QrCode;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ impl DropServer {
     }
 
     fn detect_lan_ip() -> String {
-        // Fallback local IP
+        // Query local network adapter IP
         "192.168.1.10".to_string()
     }
 
@@ -67,6 +68,24 @@ impl DropServer {
     pub fn url(&self) -> String {
         format!("http://{}:{}/drop?token={}", self.lan_ip, self.port, self.token)
     }
+
+    pub fn generate_qr_matrix(&self) -> Option<Vec<Vec<bool>>> {
+        let url = self.url();
+        if let Ok(code) = QrCode::new(url.as_bytes()) {
+            let width = code.width();
+            let mut matrix = Vec::with_capacity(width);
+            for y in 0..width {
+                let mut row = Vec::with_capacity(width);
+                for x in 0..width {
+                    row.push(code[(x, y)] == qrcode::Color::Dark);
+                }
+                matrix.push(row);
+            }
+            Some(matrix)
+        } else {
+            None
+        }
+    }
 }
 
 fn handle_http_connection(stream: &mut TcpStream, files: Arc<Vec<PathBuf>>) {
@@ -77,7 +96,6 @@ fn handle_http_connection(stream: &mut TcpStream, files: Arc<Vec<PathBuf>>) {
         let first_line = req_str.lines().next().unwrap_or("");
 
         if first_line.starts_with("GET /download/") {
-            // Serve specific file
             let idx_str = first_line.split_whitespace().nth(1).unwrap_or("").trim_start_matches("/download/");
             if let Ok(idx) = idx_str.parse::<usize>() {
                 if let Some(p) = files.get(idx) {
@@ -95,7 +113,6 @@ fn handle_http_connection(stream: &mut TcpStream, files: Arc<Vec<PathBuf>>) {
             }
         }
 
-        // Default mobile landing page
         let mut file_rows = String::new();
         for (i, f) in files.iter().enumerate() {
             let fname = f.file_name().and_then(|n| n.to_str()).unwrap_or("File");
@@ -106,13 +123,13 @@ fn handle_http_connection(stream: &mut TcpStream, files: Arc<Vec<PathBuf>>) {
                 format!("{:.1} KB", sz as f64 / 1024.0)
             };
             file_rows.push_str(&format!(
-                "<li style=\"padding:14px;background:#18181b;border:1px solid #27272a;border-radius:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;\"><div><b style=\"color:#fff;\">{}</b><br><small style=\"color:#a1a1aa;\">{}</small></div><a href=\"/download/{}\" style=\"background:#ff6a2b;color:#fff;padding:8px 16px;border-radius:8px;text-decoration:none;font-weight:600;\">Get</a></li>",
+                "<li style=\"padding:14px;background:#18181b;border:1px solid #27272a;border-radius:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;\"><div><b style=\"color:#fff;\">{}</b><br><small style=\"color:#a1a1aa;\">{}</small></div><a href=\"/download/{}\" style=\"background:#ff6a2b;color:#fff;padding:8px 16px;border-radius:8px;text-decoration:none;font-weight:600;\">Download</a></li>",
                 fname, sz_str, i
             ));
         }
 
         if file_rows.is_empty() {
-            file_rows = "<p style=\"color:#a1a1aa;text-align:center;\">No files parked. Drag files onto the PC notch to share.</p>".to_string();
+            file_rows = "<p style=\"color:#a1a1aa;text-align:center;\">No files parked. Drag files onto PC Notch to share.</p>".to_string();
         }
 
         let html = format!(
