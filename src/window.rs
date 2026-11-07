@@ -573,7 +573,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let add_btn_top = content_top + 12.0;
                 if fx >= add_btn_left && fx <= content_left + left_w - 14.0 && fy >= add_btn_top && fy <= add_btn_top + 22.0 {
                     let note_count = ctx.prod_mgr.notes.len() + 1;
-                    ctx.prod_mgr.add_note(&format!("Task #{} (Click 'Edit' to change text)", note_count));
+                    ctx.prod_mgr.add_note(&format!("New Note #{}", note_count));
+                    ctx.prod_mgr.start_editing();
                     render_and_update_layered(hwnd, ctx);
                     return LRESULT(0);
                 }
@@ -589,6 +590,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         } else {
                             // Select note
                             ctx.prod_mgr.selected_note_id = Some(note.id);
+                            ctx.prod_mgr.editing_note = false;
                         }
                         render_and_update_layered(hwnd, ctx);
                         return LRESULT(0);
@@ -596,36 +598,33 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     note_y += 36.0;
                 }
 
-                // Edit Button click in right pane
+                // Edit / Save Button click in right pane
                 let edit_btn_left = content_right - 140.0;
                 let edit_btn_top = content_top + 12.0;
                 if fx >= edit_btn_left && fx <= content_right - 80.0 && fy >= edit_btn_top && fy <= edit_btn_top + 22.0 {
-                    let current_text = if let Some(id) = ctx.prod_mgr.selected_note_id {
-                        ctx.prod_mgr.notes.iter().find(|n| n.id == id).map(|n| n.content.clone()).unwrap_or_default()
-                    } else if let Some(first) = ctx.prod_mgr.notes.first() {
-                        first.content.clone()
+                    if ctx.prod_mgr.editing_note {
+                        ctx.prod_mgr.save_editing();
                     } else {
-                        "".to_string()
-                    };
-                    
-                    // Cycle quick prefix or update with timestamp
-                    let st = windows::Win32::System::SystemInformation::GetLocalTime();
-                    let updated = format!("{} (Updated {:02}:{:02})", current_text.split(" (Updated").next().unwrap_or(&current_text), st.wHour, st.wMinute);
-                    ctx.prod_mgr.update_selected_note(&updated);
+                        ctx.prod_mgr.start_editing();
+                    }
                     render_and_update_layered(hwnd, ctx);
                     return LRESULT(0);
                 }
 
-                // Delete Button click in right pane
+                // Delete / Cancel Button click in right pane
                 let del_btn_left = content_right - 70.0;
                 let del_btn_top = content_top + 12.0;
                 if fx >= del_btn_left && fx <= content_right - 16.0 && fy >= del_btn_top && fy <= del_btn_top + 22.0 {
-                    if let Some(id) = ctx.prod_mgr.selected_note_id {
+                    if ctx.prod_mgr.editing_note {
+                        ctx.prod_mgr.cancel_editing();
+                    } else if let Some(id) = ctx.prod_mgr.selected_note_id {
                         ctx.prod_mgr.remove_note(id);
-                        ctx.prod_mgr.selected_note_id = ctx.prod_mgr.notes.first().map(|n| n.id);
-                        render_and_update_layered(hwnd, ctx);
-                        return LRESULT(0);
+                    } else if let Some(first) = ctx.prod_mgr.notes.first() {
+                        let id = first.id;
+                        ctx.prod_mgr.remove_note(id);
                     }
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
                 }
             }
 
@@ -882,9 +881,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         return LRESULT(0);
     }
 
+    if msg == WM_CHAR {
+        if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Notes && ctx.prod_mgr.editing_note {
+            let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
+            if ch != '\0' {
+                ctx.prod_mgr.push_char_to_edit(ch);
+                render_and_update_layered(hwnd, ctx);
+                return LRESULT(0);
+            }
+        }
+    }
+
     if msg == WM_KEYDOWN {
         if wparam.0 == VK_ESCAPE.0 as usize {
-            if ctx.state == NotchState::Expanded || ctx.state == NotchState::Expanding {
+            if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Notes && ctx.prod_mgr.editing_note {
+                ctx.prod_mgr.cancel_editing();
+                render_and_update_layered(hwnd, ctx);
+                return LRESULT(0);
+            } else if ctx.state == NotchState::Expanded || ctx.state == NotchState::Expanding {
                 start_collapse(hwnd, ctx);
             }
         }

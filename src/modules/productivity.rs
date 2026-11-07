@@ -24,6 +24,7 @@ pub struct ProductivityManager {
     pub notes: Vec<NoteItem>,
     pub selected_note_id: Option<usize>,
     pub editing_note: bool,
+    pub edit_buffer: String,
     pub parked_files: Vec<PathBuf>,
     next_timer_id: usize,
     next_note_id: usize,
@@ -53,6 +54,7 @@ impl ProductivityManager {
             notes: Vec::new(),
             selected_note_id: None,
             editing_note: false,
+            edit_buffer: String::new(),
             parked_files: Vec::new(),
             next_timer_id: 3,
             next_note_id: 1,
@@ -131,8 +133,55 @@ impl ProductivityManager {
         }
     }
 
+    pub fn start_editing(&mut self) {
+        if let Some(id) = self.selected_note_id {
+            if let Some(n) = self.notes.iter().find(|n| n.id == id) {
+                self.edit_buffer = n.content.clone();
+                self.editing_note = true;
+                return;
+            }
+        }
+        if let Some(first) = self.notes.first() {
+            self.selected_note_id = Some(first.id);
+            self.edit_buffer = first.content.clone();
+            self.editing_note = true;
+        }
+    }
+
+    pub fn save_editing(&mut self) {
+        if self.editing_note {
+            let buffer = self.edit_buffer.trim().to_string();
+            if !buffer.is_empty() {
+                self.update_selected_note(&buffer);
+            }
+            self.editing_note = false;
+        }
+    }
+
+    pub fn cancel_editing(&mut self) {
+        self.editing_note = false;
+        self.edit_buffer.clear();
+    }
+
+    pub fn push_char_to_edit(&mut self, ch: char) {
+        if self.editing_note {
+            if ch == '\x08' {
+                // Backspace
+                self.edit_buffer.pop();
+            } else if ch == '\r' || ch == '\n' {
+                self.save_editing();
+            } else if !ch.is_control() {
+                self.edit_buffer.push(ch);
+            }
+        }
+    }
+
     pub fn remove_note(&mut self, id: usize) {
         self.notes.retain(|n| n.id != id);
+        if self.selected_note_id == Some(id) {
+            self.selected_note_id = self.notes.first().map(|n| n.id);
+            self.editing_note = false;
+        }
         self.save_notes();
     }
 
