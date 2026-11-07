@@ -262,8 +262,9 @@ fn render_and_update_layered(hwnd: HWND, ctx: &mut WindowContext) {
     let stats_data = ctx.stats_sampler.get_metrics();
     ctx.media_info = ctx.media_watcher.get_info();
 
-    let enabled_modules = {
-        ctx.config.lock().unwrap().enabled_modules.clone()
+    let (enabled_modules, time_format_24h, shrink_mode) = {
+        let cfg = ctx.config.lock().unwrap();
+        (cfg.enabled_modules.clone(), cfg.time_format_24h, cfg.shrink_mode)
     };
 
     let _ = ctx.renderer.render_to_dc(
@@ -281,6 +282,8 @@ fn render_and_update_layered(hwnd: HWND, ctx: &mut WindowContext) {
         &ctx.prod_mgr,
         &ctx.clipboard_mgr,
         &enabled_modules,
+        time_format_24h,
+        shrink_mode,
     );
 
     unsafe {
@@ -587,14 +590,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 
     if msg == WM_SETTINGS_CHANGED {
-        let (theme_name, col_w, col_h, exp_w, exp_h) = {
+        let (theme_name, col_w, col_h, exp_w, exp_h, shrink_mode) = {
             let cfg = ctx.config.lock().unwrap();
-            (cfg.theme.clone(), cfg.collapsed_width, cfg.collapsed_height, cfg.expanded_width, cfg.expanded_height)
+            (cfg.theme.clone(), cfg.collapsed_width, cfg.collapsed_height, cfg.expanded_width, cfg.expanded_height, cfg.shrink_mode)
         };
         ctx.theme_tokens = ThemeTokens::from_name(&theme_name);
         if ctx.state == NotchState::Collapsed {
-            ctx.current_w = col_w;
-            ctx.current_h = col_h;
+            if shrink_mode {
+                ctx.current_w = 48;
+                ctx.current_h = 16;
+            } else {
+                ctx.current_w = col_w;
+                ctx.current_h = col_h;
+            }
         } else if ctx.state == NotchState::Expanded {
             ctx.current_w = exp_w;
             ctx.current_h = exp_h;
@@ -688,7 +696,11 @@ fn handle_animation_tick(hwnd: HWND, ctx: &mut WindowContext) {
 
     let (col_w, col_h, exp_w, exp_h) = {
         let cfg = ctx.config.lock().unwrap();
-        (cfg.collapsed_width as f32, cfg.collapsed_height as f32, cfg.expanded_width as f32, cfg.expanded_height as f32)
+        if cfg.shrink_mode {
+            (48.0, 16.0, cfg.expanded_width as f32, cfg.expanded_height as f32)
+        } else {
+            (cfg.collapsed_width as f32, cfg.collapsed_height as f32, cfg.expanded_width as f32, cfg.expanded_height as f32)
+        }
     };
 
     match ctx.state {

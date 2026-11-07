@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub clipboard_history_limit: usize,
     pub clipboard_images_limit: usize,
     pub enabled_modules: EnabledModules,
+    pub time_format_24h: bool,
+    pub shrink_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +102,8 @@ impl Default for AppConfig {
             clipboard_history_limit: 50,
             clipboard_images_limit: 10,
             enabled_modules: EnabledModules::default(),
+            time_format_24h: false, // Default to 12h format (e.g. "10:05 PM")
+            shrink_mode: false,
         }
     }
 }

@@ -375,6 +375,8 @@ impl D2DRenderer {
         prod: &ProductivityManager,
         clip: &ClipboardManager,
         enabled_modules: &crate::config::EnabledModules,
+        time_format_24h: bool,
+        shrink_mode: bool,
     ) -> Result<()> {
         let bottom_r = 14.0 + (progress * 14.0);
         let ear_r = 14.0 + (progress * 6.0);
@@ -723,51 +725,74 @@ impl D2DRenderer {
                 let pill_cy = height / 2.0;
                 let center_x = width / 2.0;
 
-                let time_str = {
-                    let st = windows::Win32::System::SystemInformation::GetLocalTime();
-                    format!("{:02}:{:02}", st.wHour, st.wMinute)
-                };
+                if shrink_mode {
+                    // Shrink Mode: Draw minimal discreet arrow chevron (down arrow v)
+                    let arrow_geom = self.factory.CreatePathGeometry()?;
+                    let sink = arrow_geom.Open()?;
+                    sink.BeginFigure(D2D_POINT_2F { x: center_x - 6.0, y: pill_cy - 2.0 }, D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink.AddLine(D2D_POINT_2F { x: center_x, y: pill_cy + 3.5 });
+                    sink.AddLine(D2D_POINT_2F { x: center_x + 6.0, y: pill_cy - 2.0 });
+                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                    sink.Close()?;
+                    target.DrawGeometry(&arrow_geom, &accent_brush, 2.0, None);
+                } else {
+                    let time_str = {
+                        let st = windows::Win32::System::SystemInformation::GetLocalTime();
+                        if time_format_24h {
+                            format!("{:02}:{:02}", st.wHour, st.wMinute)
+                        } else {
+                            let (h, ampm) = if st.wHour == 0 {
+                                (12, "AM")
+                            } else if st.wHour < 12 {
+                                (st.wHour, "AM")
+                            } else if st.wHour == 12 {
+                                (12, "PM")
+                            } else {
+                                (st.wHour - 12, "PM")
+                            };
+                            format!("{}:{:02} {}", h, st.wMinute, ampm)
+                        }
+                    };
 
-                let pill_white = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.92, g: 0.92, b: 0.92, a: 0.95 }, None)?;
-                let pill_secondary = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.65, g: 0.65, b: 0.65, a: 0.9 }, None)?;
+                    let pill_white = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
 
-                if media.has_media && media.is_playing {
-                    // Small music note icon + Song title + Clock
-                    let _ = self.icon_painter.draw_icon(&target, &self.factory, 12, center_x - 68.0, pill_cy, &accent_brush);
-                    if let Ok(mfmt) = self.get_meta_format() {
-                        let track_display = if media.title.len() > 14 {
-                            format!("{}...", &media.title[..12])
+                    let _ = self.get_body_format();
+                    let bfmt = self.body_format.as_ref().unwrap();
+
+                    if media.has_media && media.is_playing {
+                        // Small music note icon + Song title + Clock
+                        let _ = self.icon_painter.draw_icon(&target, &self.factory, 12, center_x - 72.0, pill_cy, &accent_brush);
+                        let track_display = if media.title.len() > 12 {
+                            format!("{}...", &media.title[..10])
                         } else {
                             media.title.clone()
                         };
                         let disp = format!("{} · {}", track_display, time_str);
                         let wide: Vec<u16> = disp.encode_utf16().collect();
                         let tr = D2D_RECT_F {
-                            left: center_x - 56.0,
-                            top: pill_cy - 7.0,
-                            right: center_x + 80.0,
-                            bottom: pill_cy + 9.0,
+                            left: center_x - 60.0,
+                            top: pill_cy - 10.0,
+                            right: center_x + 85.0,
+                            bottom: pill_cy + 12.0,
                         };
-                        target.DrawText(&wide, mfmt, &tr, &pill_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                    }
-                } else {
-                    // Clean live clock + status indicator
-                    let dot = D2D1_ELLIPSE {
-                        point: D2D_POINT_2F { x: center_x - 28.0, y: pill_cy },
-                        radiusX: 2.5,
-                        radiusY: 2.5,
-                    };
-                    target.FillEllipse(&dot, &accent_brush);
+                        target.DrawText(&wide, bfmt, &tr, &pill_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    } else {
+                        // Clean live clock with blue status dot
+                        let dot = D2D1_ELLIPSE {
+                            point: D2D_POINT_2F { x: center_x - 42.0, y: pill_cy },
+                            radiusX: 3.5,
+                            radiusY: 3.5,
+                        };
+                        target.FillEllipse(&dot, &accent_brush);
 
-                    if let Ok(mfmt) = self.get_meta_format() {
                         let wide: Vec<u16> = time_str.encode_utf16().collect();
                         let tr = D2D_RECT_F {
-                            left: center_x - 18.0,
-                            top: pill_cy - 7.0,
-                            right: center_x + 36.0,
-                            bottom: pill_cy + 9.0,
+                            left: center_x - 32.0,
+                            top: pill_cy - 10.0,
+                            right: center_x + 56.0,
+                            bottom: pill_cy + 12.0,
                         };
-                        target.DrawText(&wide, mfmt, &tr, &pill_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        target.DrawText(&wide, bfmt, &tr, &pill_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                     }
                 }
             }

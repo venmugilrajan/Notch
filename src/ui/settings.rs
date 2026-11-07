@@ -195,14 +195,14 @@ fn handle_settings_click(hwnd: HWND, ctx: &mut SettingsWindowContext, x: i32, y:
         }
         1 => {
             // Page 1: Notch
-            // Size chips at y: 145..195 (Small: 200x32, Default: 200x32, Large: 240x36)
+            // Size chips at y: 145..195 (Small: 180x30, Default: 200x32, Large: 240x36)
             if y >= 145 && y <= 195 {
                 let sizes = [
                     (180, 30, 720, 320),
                     (200, 32, 760, 340),
                     (240, 36, 820, 380),
                 ];
-                let chip_w = 110;
+                let chip_w = 120;
                 for (i, (cw, ch, ew, eh)) in sizes.iter().enumerate() {
                     let cx = 256 + (i as i32 * (chip_w + 14));
                     if x >= cx && x <= cx + chip_w {
@@ -215,6 +215,20 @@ fn handle_settings_click(hwnd: HWND, ctx: &mut SettingsWindowContext, x: i32, y:
                         break;
                     }
                 }
+            }
+
+            // Shrink Mode Toggle at y: 220..260, x: 740..830
+            if y >= 220 && y <= 260 && x >= 740 && x <= 830 {
+                cfg.shrink_mode = !cfg.shrink_mode;
+                let _ = cfg.save();
+                changed = true;
+            }
+
+            // Time Format Toggle (12h vs 24h) at y: 280..320, x: 740..830
+            if y >= 280 && y <= 320 && x >= 740 && x <= 830 {
+                cfg.time_format_24h = !cfg.time_format_24h;
+                let _ = cfg.save();
+                changed = true;
             }
         }
         2 => {
@@ -356,38 +370,47 @@ fn draw_settings_ui(hdc: HDC, ctx: &SettingsWindowContext) {
         SetTextColor(mem_dc, COLORREF(0x00777777));
         draw_gdi_text(mem_dc, "Search    Ctrl K", 28, 68, 12, false);
 
-        // 8 Navigation Items per Feature 6 spec:
-        // General, Notch, Appearance, Modules, Live Activities, Privacy, Updates, About
+        // 8 Navigation Items with distinct vector icon symbols and color badges
         let nav_items = [
-            ("General", 0x003B82F6),        // Blue
-            ("Notch", 0x0010B981),          // Green
-            ("Appearance", 0x00EC4899),     // Pink
-            ("Modules", 0x00F59E0B),        // Amber
-            ("Live Activities", 0x008B5CF6),// Purple
-            ("Privacy", 0x0064748B),        // Slate
-            ("Updates", 0x0006B6D4),        // Cyan
-            ("About", 0x0094A3B8),          // Grey
+            ("General", 0x003B82F6, "⚙"),
+            ("Notch", 0x0010B981, "⬛"),
+            ("Appearance", 0x00EC4899, "🎨"),
+            ("Modules", 0x00F59E0B, "🧩"),
+            ("Live Activities", 0x008B5CF6, "⚡"),
+            ("Privacy", 0x0064748B, "🛡"),
+            ("Updates", 0x0006B6D4, "🔄"),
+            ("About", 0x0094A3B8, "ℹ"),
         ];
 
         let mut nav_y = 105;
-        for (i, (label, color)) in nav_items.iter().enumerate() {
+        for (i, (label, color, icon_str)) in nav_items.iter().enumerate() {
             let is_active = ctx.active_page == i;
             if is_active {
-                let item_rect = RECT { left: 12, top: nav_y, right: 208, bottom: nav_y + 36 };
-                let active_brush = CreateSolidBrush(COLORREF(0x00262626));
+                let item_rect = RECT { left: 10, top: nav_y, right: 210, bottom: nav_y + 38 };
+                let active_brush = CreateSolidBrush(COLORREF(0x002B2B2B));
                 let _ = FillRect(mem_dc, &item_rect, active_brush);
                 let _ = DeleteObject(active_brush);
+
+                // Left accent indicator line
+                let acc_brush = CreateSolidBrush(COLORREF(*color));
+                let acc_rect = RECT { left: 10, top: nav_y + 4, right: 13, bottom: nav_y + 34 };
+                let _ = FillRect(mem_dc, &acc_rect, acc_brush);
+                let _ = DeleteObject(acc_brush);
             }
 
-            // Rounded color badge
+            // Rounded color badge with icon
             let dot_brush = CreateSolidBrush(COLORREF(*color));
-            let dot_rect = RECT { left: 24, top: nav_y + 11, right: 38, bottom: nav_y + 25 };
+            let dot_rect = RECT { left: 22, top: nav_y + 8, right: 40, bottom: nav_y + 26 };
             let _ = FillRect(mem_dc, &dot_rect, dot_brush);
             let _ = DeleteObject(dot_brush);
 
-            let txt_color = if is_active { 0x00FFFFFF } else { 0x00AAAAAA };
+            // Icon text inside badge
+            SetTextColor(mem_dc, COLORREF(0x00FFFFFF));
+            draw_gdi_text(mem_dc, icon_str, 24, nav_y + 9, 13, false);
+
+            let txt_color = if is_active { 0x00FFFFFF } else { 0x00CCCCCC };
             SetTextColor(mem_dc, COLORREF(txt_color));
-            draw_gdi_text(mem_dc, label, 48, nav_y + 9, 13, is_active);
+            draw_gdi_text(mem_dc, label, 50, nav_y + 9, 15, is_active);
 
             nav_y += 42;
         }
@@ -469,9 +492,13 @@ fn draw_settings_page_content(hdc: HDC, ctx: &SettingsWindowContext) {
                     draw_gdi_text(hdc, s_label, chip_x + 10, 158, 12, is_cur);
                 }
 
-                draw_section_header(hdc, "TIMINGS", content_x, 215);
-                draw_info_row(hdc, "Hover Delay", &format!("{} ms", cfg.hover_delay_ms), content_x, 245);
-                draw_info_row(hdc, "Auto Collapse Delay", &format!("{} ms", cfg.auto_collapse_delay_ms), content_x, 305);
+                draw_section_header(hdc, "BEHAVIOR & FORMAT", content_x, 215);
+                draw_toggle_row(hdc, "Shrink to Arrow", "Collapse into an ultra-minimal chevron arrow to prevent blocking browser tabs.", cfg.shrink_mode, content_x, 235);
+                draw_toggle_row(hdc, "24-Hour Time Format", "Display time in 24-hour format instead of 12-hour AM/PM.", cfg.time_format_24h, content_x, 295);
+
+                draw_section_header(hdc, "TIMINGS", content_x, 365);
+                draw_info_row(hdc, "Hover Delay", &format!("{} ms", cfg.hover_delay_ms), content_x, 395);
+                draw_info_row(hdc, "Auto Collapse Delay", &format!("{} ms", cfg.auto_collapse_delay_ms), content_x, 440);
             }
             2 => {
                 // Page 2: Appearance & Themes (Feature 6 & Feature 7)
@@ -626,17 +653,17 @@ fn draw_settings_page_content(hdc: HDC, ctx: &SettingsWindowContext) {
 
 fn draw_section_header(hdc: HDC, title: &str, x: i32, y: i32) {
     unsafe {
-        SetTextColor(hdc, COLORREF(0x00666666));
-        draw_gdi_text(hdc, title, x, y, 10, true);
+        SetTextColor(hdc, COLORREF(0x00888888));
+        draw_gdi_text(hdc, title, x, y, 12, true);
     }
 }
 
 fn draw_toggle_row(hdc: HDC, title: &str, desc: &str, is_on: bool, x: i32, y: i32) {
     unsafe {
         SetTextColor(hdc, COLORREF(0x00FFFFFF));
-        draw_gdi_text(hdc, title, x, y, 14, true);
-        SetTextColor(hdc, COLORREF(0x00888888));
-        draw_gdi_text(hdc, desc, x, y + 20, 11, false);
+        draw_gdi_text(hdc, title, x, y, 16, true);
+        SetTextColor(hdc, COLORREF(0x00AAAAAA));
+        draw_gdi_text(hdc, desc, x, y + 22, 13, false);
 
         // Toggle Switch at 780..820
         let switch_bg = if is_on { 0x0010B981 } else { 0x002B2B2B };
@@ -655,8 +682,8 @@ fn draw_toggle_row(hdc: HDC, title: &str, desc: &str, is_on: bool, x: i32, y: i3
 
 fn draw_segmented_row(hdc: HDC, title: &str, current_w: u32, enabled: bool, x: i32, y: i32) {
     unsafe {
-        SetTextColor(hdc, COLORREF(if enabled { 0x00FFFFFF } else { 0x00555555 }));
-        draw_gdi_text(hdc, title, x, y, 14, true);
+        SetTextColor(hdc, COLORREF(if enabled { 0x00FFFFFF } else { 0x00666666 }));
+        draw_gdi_text(hdc, title, x, y, 16, true);
 
         let widths = [1, 2, 3];
         for (i, w) in widths.iter().enumerate() {
@@ -670,8 +697,8 @@ fn draw_segmented_row(hdc: HDC, title: &str, current_w: u32, enabled: bool, x: i
             let _ = DeleteObject(brush);
 
             let txt = format!("{} px", w);
-            SetTextColor(hdc, COLORREF(if is_cur { 0x00FFFFFF } else { 0x00888888 }));
-            draw_gdi_text(hdc, &txt, bx + 7, y + 6, 11, is_cur);
+            SetTextColor(hdc, COLORREF(if is_cur { 0x00FFFFFF } else { 0x00999999 }));
+            draw_gdi_text(hdc, &txt, bx + 7, y + 6, 13, is_cur);
         }
     }
 }
@@ -679,9 +706,9 @@ fn draw_segmented_row(hdc: HDC, title: &str, current_w: u32, enabled: bool, x: i
 fn draw_info_row(hdc: HDC, title: &str, value: &str, x: i32, y: i32) {
     unsafe {
         SetTextColor(hdc, COLORREF(0x00FFFFFF));
-        draw_gdi_text(hdc, title, x, y, 13, false);
-        SetTextColor(hdc, COLORREF(0x00888888));
-        draw_gdi_text(hdc, value, 580, y, 12, true);
+        draw_gdi_text(hdc, title, x, y, 15, false);
+        SetTextColor(hdc, COLORREF(0x00AAAAAA));
+        draw_gdi_text(hdc, value, 560, y, 14, true);
     }
 }
 
