@@ -4,6 +4,7 @@ use crate::modules::converters::ConverterState;
 use crate::modules::drop_server::DropServer;
 use crate::modules::links::LinksManager;
 use crate::modules::media::{MediaInfo, MediaWatcher};
+use crate::modules::notes::NotesManager;
 use crate::modules::power::{PowerNotifier, PowerStatusInfo};
 use crate::modules::productivity::ProductivityManager;
 use crate::modules::stats::SystemStatsSampler;
@@ -35,6 +36,7 @@ const TIMER_ANIMATION_ID: usize = 1;
 const TIMER_AUTOHIDE_ID: usize = 2;
 const TIMER_LEAVE_COLLAPSE_ID: usize = 3;
 const TIMER_MEDIA_REFRESH_ID: usize = 4;
+const TIMER_NOTES_AUTOSAVE_ID: usize = 5;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum NotchState {
@@ -72,6 +74,12 @@ pub struct WindowContext {
     pub conv_state: ConverterState,
     pub links_mgr: LinksManager,
     pub drop_srv: DropServer,
+    pub notes_mgr: NotesManager,
+    pub note_editor_hwnd: HWND,
+    pub note_title_hwnd: HWND,
+    pub note_body_hwnd: HWND,
+    pub note_editor_visible: bool,
+    pub note_prev_active: HWND,
     pub mem_dc: HDC,
     pub dib_bitmap: HBITMAP,
     pub dib_bits: *mut u8,
@@ -102,6 +110,23 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
         if atom == 0 {
             return Err(Error::from_win32());
         }
+
+        // Register container class for native notes editor
+        let note_host_class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(note_host_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance.into(),
+            hIcon: HICON(std::ptr::null_mut()),
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
+            lpszMenuName: PCWSTR::null(),
+            lpszClassName: w!("NotchNoteHost"),
+            hIconSm: HICON(std::ptr::null_mut()),
+        };
+        let _ = RegisterClassExW(&note_host_class);
 
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
@@ -171,6 +196,12 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
             conv_state: ConverterState::new(),
             links_mgr: LinksManager::new(),
             drop_srv: DropServer::new(),
+            notes_mgr: NotesManager::new(),
+            note_editor_hwnd: HWND(std::ptr::null_mut()),
+            note_title_hwnd: HWND(std::ptr::null_mut()),
+            note_body_hwnd: HWND(std::ptr::null_mut()),
+            note_editor_visible: false,
+            note_prev_active: HWND(std::ptr::null_mut()),
             mem_dc: HDC(std::ptr::null_mut()),
             dib_bitmap: HBITMAP(std::ptr::null_mut()),
             dib_bits: std::ptr::null_mut(),
@@ -300,6 +331,8 @@ fn render_and_update_layered(hwnd: HWND, ctx: &mut WindowContext) {
         &ctx.conv_state,
         &ctx.links_mgr,
         &ctx.drop_srv,
+        &ctx.notes_mgr,
+        ctx.note_editor_visible,
         &enabled_modules,
         time_format_24h,
         shrink_mode,
@@ -429,6 +462,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         ctx.is_hovered = false;
         ctx.hovered_dock_index = None;
         if !ctx.is_pinned && (ctx.state == NotchState::Expanded || ctx.state == NotchState::Expanding) {
+            // Guard: don't auto-collapse if editor is focused or was recently typed in (last 2s)
+            if ctx.note_editor_visible {
+                return LRESULT(0);
+            }
+            if let Some(last) = ctx.notes_mgr.last_typed {
+                if last.elapsed().as_secs() < 2 {
+                    return LRESULT(0);
+                }
+            }
             let auto_delay = ctx.config.lock().unwrap().auto_collapse_delay_ms;
             let _ = SetTimer(hwnd, TIMER_LEAVE_COLLAPSE_ID, auto_delay, None);
         }
@@ -568,84 +610,90 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let ear_r = 14.0 + (ctx.animation_progress * 6.0);
                 let content_left = ear_r + 14.0;
                 let content_top = 48.0;
-                let left_w = 260.0;
+                let left_w = 232.0;
+                let gap = 12.0;
+                let right_left = content_left + left_w + gap;
                 let fx = x as f32;
                 let fy = y as f32;
 
-                // "+ Note" button click in left pane header
-                let add_btn_left = content_left + left_w - 68.0;
-                let add_btn_top = content_top + 12.0;
-                if fx >= add_btn_left && fx <= content_left + left_w - 14.0 && fy >= add_btn_top && fy <= add_btn_top + 22.0 {
-                    let note_count = ctx.prod_mgr.notes.len() + 1;
-                    ctx.prod_mgr.add_note(&format!("New Note #{}", note_count));
-                    ctx.prod_mgr.start_editing();
+                // "+ New" button click in left pane header
+                let add_btn_left = content_left + left_w - 64.0;
+                let add_btn_top = content_top + 10.0;
+                if fx >= add_btn_left && fx <= content_left + left_w - 12.0 && fy >= add_btn_top && fy <= add_btn_top + 24.0 {
+                    notes_flush_editor_to_model(ctx);
+                    ctx.notes_mgr.delete_empty_selected();
+                    ctx.notes_mgr.add_note();
+                    notes_show_editor(hwnd, ctx, false);
                     render_and_update_layered(hwnd, ctx);
                     return LRESULT(0);
                 }
 
-                // Note row clicks (Select or Checkbox)
-                let mut note_y = content_top + 48.0;
-                for note in ctx.prod_mgr.notes.clone().iter().take(5) {
-                    if fx >= content_left + 10.0 && fx <= content_left + left_w - 10.0 && fy >= note_y && fy <= note_y + 32.0 {
-                        let check_cx = content_left + 10.0 + 14.0;
-                        if (fx - check_cx).abs() <= 12.0 {
-                            // Toggle checkbox
-                            ctx.prod_mgr.toggle_note(note.id);
-                        } else {
-                            // Select note
-                            ctx.prod_mgr.selected_note_id = Some(note.id);
-                            ctx.prod_mgr.editing_note = false;
-                        }
-                        render_and_update_layered(hwnd, ctx);
-                        return LRESULT(0);
-                    }
-                    note_y += 36.0;
-                }
-
-                // Edit / Save Button click in right pane
-                let edit_btn_left = content_right - 140.0;
-                let edit_btn_top = content_top + 12.0;
-                if fx >= edit_btn_left && fx <= content_right - 80.0 && fy >= edit_btn_top && fy <= edit_btn_top + 22.0 {
-                    if ctx.prod_mgr.editing_note {
-                        ctx.prod_mgr.save_editing();
-                    } else {
-                        ctx.prod_mgr.start_editing();
-                        unsafe {
-                            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
-                        }
-                    }
-                    render_and_update_layered(hwnd, ctx);
-                    return LRESULT(0);
-                }
-
-                // Click inside the note content area to also start editing
-                let content_box_left = content_left + left_w + 12.0;
-                let content_box_top = content_top + 40.0;
-                if fx >= content_box_left && fx <= content_right && fy >= content_box_top && fy <= ctx.current_h as f32 - 60.0 {
-                    if !ctx.prod_mgr.editing_note {
-                        ctx.prod_mgr.start_editing();
-                        unsafe {
-                            let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+                // Note row clicks
+                let list_top = content_top + 42.0;
+                let row_h = 38.0;
+                let row_gap = 2.0;
+                let notes_to_check: Vec<u64> = ctx.notes_mgr.filtered_notes().iter().map(|n| n.id).collect();
+                for (idx, &nid) in notes_to_check.iter().take(5).enumerate() {
+                    let r_top = list_top + (idx as f32 * (row_h + row_gap));
+                    if fx >= content_left + 8.0 && fx <= content_left + left_w - 8.0 && fy >= r_top && fy <= r_top + row_h {
+                        if ctx.notes_mgr.selected_id != Some(nid) {
+                            notes_flush_editor_to_model(ctx);
+                            ctx.notes_mgr.delete_empty_selected();
+                            ctx.notes_mgr.selected_id = Some(nid);
+                            if ctx.note_editor_visible {
+                                notes_load_into_editor(ctx);
+                            }
                         }
                         render_and_update_layered(hwnd, ctx);
                         return LRESULT(0);
                     }
                 }
 
-                // Delete / Cancel Button click in right pane
-                let del_btn_left = content_right - 70.0;
-                let del_btn_top = content_top + 12.0;
-                if fx >= del_btn_left && fx <= content_right - 16.0 && fy >= del_btn_top && fy <= del_btn_top + 22.0 {
-                    if ctx.prod_mgr.editing_note {
-                        ctx.prod_mgr.cancel_editing();
-                    } else if let Some(id) = ctx.prod_mgr.selected_note_id {
-                        ctx.prod_mgr.remove_note(id);
-                    } else if let Some(first) = ctx.prod_mgr.notes.first() {
-                        let id = first.id;
-                        ctx.prod_mgr.remove_note(id);
+                // Click in Right Pane (Editor area)
+                let right_right = content_right;
+                let right_bottom = ctx.current_h as f32 - 56.0;
+                let footer_y = right_bottom - 28.0;
+
+                // Footer action: Delete (trash icon: right_right - 36.0 to right_right - 12.0)
+                if fx >= right_right - 36.0 && fx <= right_right - 12.0 && fy >= footer_y && fy <= footer_y + 24.0 {
+                    if let Some(id) = ctx.notes_mgr.selected_id {
+                        notes_flush_editor_to_model(ctx);
+                        notes_hide_editor(ctx);
+                        ctx.notes_mgr.delete_note(id);
+                        if ctx.notes_mgr.selected_id.is_some() {
+                            notes_show_editor(hwnd, ctx, false);
+                        }
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
                     }
-                    render_and_update_layered(hwnd, ctx);
-                    return LRESULT(0);
+                }
+
+                // Footer action: Pin toggle (right_right - 68.0 to right_right - 44.0)
+                if fx >= right_right - 68.0 && fx <= right_right - 44.0 && fy >= footer_y && fy <= footer_y + 24.0 {
+                    if let Some(id) = ctx.notes_mgr.selected_id {
+                        ctx.notes_mgr.toggle_pin(id);
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                }
+
+                // Toast Undo click
+                if ctx.notes_mgr.toast_message.is_some() {
+                    if fx >= right_left + 16.0 && fx <= right_left + 220.0 && fy >= right_bottom - 44.0 && fy <= right_bottom - 12.0 {
+                        ctx.notes_mgr.undo_delete();
+                        notes_show_editor(hwnd, ctx, false);
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                }
+
+                // Click inside right card content to activate / focus editor
+                if fx >= right_left && fx <= right_right && fy >= content_top && fy <= footer_y {
+                    if !ctx.note_editor_visible {
+                        notes_show_editor(hwnd, ctx, fy > content_top + 42.0);
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
                 }
             }
 
@@ -709,7 +757,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
 
-                let card_top = top_cat_y + 36.0;
+                let card_top = top_cat_y + 42.0;
                 let card_w = (content_right - content_left - 48.0 - 24.0) / 2.0;
 
                 // Click left unit title to cycle FROM unit
@@ -733,7 +781,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let key_w = (card_w - 32.0 - (3.0 * 6.0)) / 4.0;
                 let key_h = 24.0;
                 let k_gap = 4.0;
-                let pad_top = card_top + 54.0;
+                let pad_top = card_top + 60.0;
 
                 let keypad_layout: [[char; 4]; 4] = [
                     ['C', 'S', 'B', 'D'],
@@ -895,7 +943,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     if rel_x >= 0.0 {
                         let clicked_idx = (rel_x / slot_w) as usize;
                         if clicked_idx < visible_count {
-                            ctx.active_tab = visible_tabs[clicked_idx];
+                            let old_tab = ctx.active_tab;
+                            let new_tab = visible_tabs[clicked_idx];
+                            if old_tab == NotchTab::Notes && new_tab != NotchTab::Notes {
+                                notes_flush_editor_to_model(ctx);
+                                ctx.notes_mgr.flush_save_if_pending();
+                                notes_hide_editor(ctx);
+                            }
+                            ctx.active_tab = new_tab;
                             ctx.stats_sampler.set_active(ctx.active_tab == NotchTab::Home || ctx.active_tab == NotchTab::System);
                             render_and_update_layered(hwnd, ctx);
                         }
@@ -921,26 +976,35 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         return LRESULT(0);
     }
 
-    if msg == WM_CHAR {
-        if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Notes && ctx.prod_mgr.editing_note {
-            let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
-            if ch != '\0' {
-                ctx.prod_mgr.push_char_to_edit(ch);
-                render_and_update_layered(hwnd, ctx);
-                return LRESULT(0);
-            }
-        }
-    }
-
     if msg == WM_KEYDOWN {
         if wparam.0 == VK_ESCAPE.0 as usize {
-            if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Notes && ctx.prod_mgr.editing_note {
-                ctx.prod_mgr.cancel_editing();
+            if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Notes && ctx.note_editor_visible {
+                notes_flush_editor_to_model(ctx);
+                ctx.notes_mgr.flush_save_if_pending();
+                notes_hide_editor(ctx);
                 render_and_update_layered(hwnd, ctx);
                 return LRESULT(0);
             } else if ctx.state == NotchState::Expanded || ctx.state == NotchState::Expanding {
+                if ctx.note_editor_visible {
+                    notes_flush_editor_to_model(ctx);
+                    ctx.notes_mgr.flush_save_if_pending();
+                    notes_hide_editor(ctx);
+                }
                 start_collapse(hwnd, ctx);
             }
+        }
+        return LRESULT(0);
+    }
+
+    if msg == WM_USER + 201 {
+        // EN_CHANGE forwarded from note edit control
+        if ctx.active_tab == NotchTab::Notes {
+            ctx.notes_mgr.last_typed = Some(Instant::now());
+            ctx.notes_mgr.autosave_pending = true;
+            unsafe {
+                let _ = SetTimer(hwnd, TIMER_NOTES_AUTOSAVE_ID, 400, None);
+            }
+            render_and_update_layered(hwnd, ctx);
         }
         return LRESULT(0);
     }
@@ -948,6 +1012,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     if msg == WM_TIMER {
         if wparam.0 == TIMER_ANIMATION_ID {
             handle_animation_tick(hwnd, ctx);
+            if ctx.notes_mgr.tick_toast() {
+                render_and_update_layered(hwnd, ctx);
+            }
+        } else if wparam.0 == TIMER_NOTES_AUTOSAVE_ID {
+            let _ = KillTimer(hwnd, TIMER_NOTES_AUTOSAVE_ID);
+            notes_flush_editor_to_model(ctx);
+            ctx.notes_mgr.flush_save_if_pending();
+            render_and_update_layered(hwnd, ctx);
         } else if wparam.0 == TIMER_AUTOHIDE_ID {
             check_fullscreen_state(hwnd);
         } else if wparam.0 == TIMER_MEDIA_REFRESH_ID {
@@ -1058,6 +1130,11 @@ fn start_expansion(hwnd: HWND, ctx: &mut WindowContext) {
 }
 
 fn start_collapse(hwnd: HWND, ctx: &mut WindowContext) {
+    if ctx.note_editor_visible {
+        notes_flush_editor_to_model(ctx);
+        ctx.notes_mgr.flush_save_if_pending();
+        notes_hide_editor(ctx);
+    }
     ctx.state = NotchState::Collapsing;
     ctx.animation_start = Instant::now();
     ctx.stats_sampler.set_active(false);
@@ -1139,5 +1216,200 @@ fn check_fullscreen_state(hwnd: HWND) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native Notes Editor Support (FALLBACK: Win32 EDIT control popup)
+// ---------------------------------------------------------------------------
+
+const WIN_EN_CHANGE: u32 = 0x0300;
+const WIN_ES_AUTOHSCROLL: u32 = 0x0080;
+const WIN_ES_MULTILINE: u32 = 0x0004;
+const WIN_ES_AUTOVSCROLL: u32 = 0x0040;
+const WIN_ES_WANTRETURN: u32 = 0x1000;
+
+unsafe extern "system" fn note_host_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_CTLCOLOREDIT => {
+            let hdc = HDC(wparam.0 as *mut _);
+            SetBkColor(hdc, COLORREF(0x00_10_10_10));
+            SetTextColor(hdc, COLORREF(0x00_EE_EE_EE));
+            let brush = CreateSolidBrush(COLORREF(0x00_10_10_10));
+            LRESULT(brush.0 as isize)
+        }
+        WM_ERASEBKGND => {
+            let hdc = HDC(wparam.0 as *mut _);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let brush = CreateSolidBrush(COLORREF(0x00_10_10_10));
+            FillRect(hdc, &rc, brush);
+            let _ = DeleteObject(brush);
+            LRESULT(1)
+        }
+        WM_COMMAND => {
+            let notif = (wparam.0 >> 16) as u32;
+            if notif == WIN_EN_CHANGE {
+                if let Ok(parent) = GetParent(hwnd) {
+                    if !parent.is_invalid() && parent.0 != std::ptr::null_mut() {
+                        let _ = PostMessageW(parent, WM_USER + 201, wparam, lparam);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn notes_ensure_editor_created(main_hwnd: HWND, ctx: &mut WindowContext) {
+    unsafe {
+        if !ctx.note_editor_hwnd.is_invalid() && ctx.note_editor_hwnd.0 != std::ptr::null_mut() {
+            return;
+        }
+        let instance = GetModuleHandleW(None).unwrap();
+        let host = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            w!("NotchNoteHost"),
+            w!(""),
+            WS_POPUP | WS_CLIPCHILDREN,
+            0, 0, 300, 200,
+            main_hwnd,
+            HMENU(std::ptr::null_mut()),
+            instance,
+            None,
+        ).unwrap_or(HWND(std::ptr::null_mut()));
+
+        let title_edit = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("EDIT"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(WIN_ES_AUTOHSCROLL),
+            0, 0, 300, 28,
+            host,
+            HMENU(1 as *mut _),
+            instance,
+            None,
+        ).unwrap_or(HWND(std::ptr::null_mut()));
+
+        let body_edit = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("EDIT"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WINDOW_STYLE(
+                WIN_ES_MULTILINE | WIN_ES_AUTOVSCROLL | WIN_ES_WANTRETURN
+            ),
+            0, 32, 300, 150,
+            host,
+            HMENU(2 as *mut _),
+            instance,
+            None,
+        ).unwrap_or(HWND(std::ptr::null_mut()));
+
+        ctx.note_editor_hwnd = host;
+        ctx.note_title_hwnd = title_edit;
+        ctx.note_body_hwnd = body_edit;
+    }
+}
+
+fn notes_get_edit_text(hwnd: HWND) -> String {
+    unsafe {
+        if hwnd.is_invalid() || hwnd.0 == std::ptr::null_mut() { return String::new(); }
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 { return String::new(); }
+        let mut buf: Vec<u16> = vec![0u16; (len + 2) as usize];
+        GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..len as usize]).replace("\r\n", "\n").replace('\r', "\n")
+    }
+}
+
+fn notes_set_edit_text(hwnd: HWND, text: &str) {
+    unsafe {
+        if hwnd.is_invalid() || hwnd.0 == std::ptr::null_mut() { return; }
+        let crlf = text.replace('\n', "\r\n");
+        let wide: Vec<u16> = crlf.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+    }
+}
+
+fn notes_load_into_editor(ctx: &mut WindowContext) {
+    if let Some(note) = ctx.notes_mgr.selected_note() {
+        let title = note.title.clone();
+        let body = note.body.clone();
+        notes_set_edit_text(ctx.note_title_hwnd, &title);
+        notes_set_edit_text(ctx.note_body_hwnd, &body);
+    } else {
+        notes_set_edit_text(ctx.note_title_hwnd, "");
+        notes_set_edit_text(ctx.note_body_hwnd, "");
+    }
+}
+
+fn notes_flush_editor_to_model(ctx: &mut WindowContext) {
+    if !ctx.note_editor_visible { return; }
+    let title = notes_get_edit_text(ctx.note_title_hwnd);
+    let body = notes_get_edit_text(ctx.note_body_hwnd);
+    ctx.notes_mgr.update_selected_title(&title);
+    ctx.notes_mgr.update_selected_body(&body);
+}
+
+fn notes_compute_editor_rect(ctx: &WindowContext) -> (i32, i32, i32, i32) {
+    let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+    let content_left = ear_r + 14.0;
+    let content_top = 48.0_f32;
+    let left_w = 232.0_f32;
+    let gap = 12.0_f32;
+    let right_left = content_left + left_w + gap;
+    let content_right = ctx.current_w as f32 - ear_r - 14.0;
+    let content_bottom = ctx.current_h as f32 - 56.0;
+
+    let pad = 12.0_f32;
+    let footer_h = 32.0_f32;
+
+    let editor_x = right_left + pad;
+    let editor_y = content_top + pad;
+    let editor_w = (content_right - right_left - (pad * 2.0)).max(100.0);
+    let editor_h = (content_bottom - content_top - (pad * 2.0) - footer_h).max(60.0);
+
+    let win_x = (ctx.screen_w - ctx.current_w) / 2;
+    let abs_x = win_x + editor_x as i32;
+    let abs_y = editor_y as i32;
+
+    (abs_x, abs_y, editor_w as i32, editor_h as i32)
+}
+
+fn notes_show_editor(main_hwnd: HWND, ctx: &mut WindowContext, focus_body: bool) {
+    unsafe {
+        notes_ensure_editor_created(main_hwnd, ctx);
+        notes_load_into_editor(ctx);
+
+        let (x, y, w, h) = notes_compute_editor_rect(ctx);
+        let title_h = 26i32;
+        let divider_gap = 6i32;
+        let body_y = title_h + divider_gap;
+        let body_h = (h - body_y).max(20);
+
+        let _ = SetWindowPos(
+            ctx.note_editor_hwnd,
+            HWND_TOPMOST,
+            x, y, w, h,
+            SWP_NOACTIVATE,
+        );
+        let _ = MoveWindow(ctx.note_title_hwnd, 0, 0, w, title_h, true);
+        let _ = MoveWindow(ctx.note_body_hwnd, 0, body_y, w, body_h, true);
+
+        let _ = ShowWindow(ctx.note_editor_hwnd, SW_SHOWNOACTIVATE);
+        ctx.note_editor_visible = true;
+
+        let target_focus = if focus_body { ctx.note_body_hwnd } else { ctx.note_title_hwnd };
+        let _ = SetFocus(target_focus);
+    }
+}
+
+fn notes_hide_editor(ctx: &mut WindowContext) {
+    unsafe {
+        if !ctx.note_editor_hwnd.is_invalid() && ctx.note_editor_hwnd.0 != std::ptr::null_mut() {
+            let _ = ShowWindow(ctx.note_editor_hwnd, SW_HIDE);
+        }
+        ctx.note_editor_visible = false;
     }
 }

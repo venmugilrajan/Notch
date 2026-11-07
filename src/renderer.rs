@@ -377,6 +377,8 @@ impl D2DRenderer {
         conv: &crate::modules::converters::ConverterState,
         links: &crate::modules::links::LinksManager,
         drop_srv: &crate::modules::drop_server::DropServer,
+        notes: &crate::modules::notes::NotesManager,
+        notes_editing: bool,
         enabled_modules: &crate::config::EnabledModules,
         time_format_24h: bool,
         shrink_mode: bool,
@@ -459,8 +461,8 @@ impl D2DRenderer {
                         ("Clipboard", s)
                     }
                     NotchTab::Notes => {
-                        let count = prod.notes.len();
-                        let s = if count == 1 { "1 note".to_string() } else { format!("{} notes", count) };
+                        let count = notes.notes.len();
+                        let s = if count == 1 { "1 note".to_string() } else if count == 0 { "No notes".to_string() } else { format!("{} notes", count) };
                         ("Notes", s)
                     }
                     NotchTab::FileShelf => {
@@ -557,7 +559,7 @@ impl D2DRenderer {
 
                 match active_tab {
                     NotchTab::Home => {
-                        self.render_home_grid(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, &ring_track_brush, stats, prod, clip)?;
+                        self.render_home_grid(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, &ring_track_brush, stats, prod, clip, notes)?;
                     }
                     NotchTab::System => {
                         self.render_system_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, &ring_track_brush, stats, power)?;
@@ -572,7 +574,7 @@ impl D2DRenderer {
                         self.render_clipboard_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, clip)?;
                     }
                     NotchTab::Notes => {
-                        self.render_notes_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, prod)?;
+                        self.render_notes_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, notes, notes_editing)?;
                     }
                     NotchTab::Timers => {
                         self.render_timers_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, &ring_track_brush, prod)?;
@@ -832,6 +834,7 @@ impl D2DRenderer {
         stats: &SystemStatsData,
         prod: &ProductivityManager,
         clip: &ClipboardManager,
+        notes: &crate::modules::notes::NotesManager,
     ) -> Result<()> {
         let gap = 10.0;
         let card_w = (rect.right - rect.left - (gap * 2.0)) / 3.0;
@@ -1003,15 +1006,18 @@ impl D2DRenderer {
                             let r_top = D2D_RECT_F { left: card_left + 14.0, top: card_top + 10.0, right: card_rect.right - 14.0, bottom: card_top + 24.0 };
                             target.DrawText(&wide, mfmt, &r_top, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                         }
-                        if prod.notes.is_empty() {
+                        if notes.notes.is_empty() {
                             if let Ok(sfmt) = self.get_sub_format() {
                                 let wide: Vec<u16> = "No notes yet".encode_utf16().collect();
                                 let r_empty = D2D_RECT_F { left: card_left + 14.0, top: card_top + 40.0, right: card_rect.right - 14.0, bottom: card_top + 70.0 };
                                 target.DrawText(&wide, sfmt, &r_empty, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                             }
                         } else {
-                            let note_title = prod.notes.first().map(|n| n.content.as_str()).unwrap_or("");
-                            let count_str = format!("{} note(s)", prod.notes.len());
+                            let note_title = notes.latest_note_title();
+                            let count_str = match notes.notes.first() {
+                                Some(n) if n.kind == crate::modules::notes::NoteKind::Checklist => n.preview(),
+                                _ => if notes.notes.len() == 1 { "1 note".to_string() } else { format!("{} notes", notes.notes.len()) },
+                            };
                             if let Ok(tfmt) = self.get_title_format() {
                                 let wide: Vec<u16> = note_title.encode_utf16().collect();
                                 let r_mid = D2D_RECT_F { left: card_left + 14.0, top: card_top + 28.0, right: card_rect.right - 14.0, bottom: card_top + 50.0 };
@@ -1782,7 +1788,8 @@ impl D2DRenderer {
         Ok(())
     }
 
-    // Real Two-Pane Notes Page (Left list, Right editor preview)
+    // Notes Page - Two-Pane layout (LEFT 232px list, RIGHT 492px editor)
+    // FALLBACK: Native Win32 EDIT control used for multiline editing
     unsafe fn render_notes_page(
         &mut self,
         target: &ID2D1DCRenderTarget,
@@ -1792,12 +1799,14 @@ impl D2DRenderer {
         white: &ID2D1SolidColorBrush,
         secondary: &ID2D1SolidColorBrush,
         accent: &ID2D1SolidColorBrush,
-        prod: &ProductivityManager,
+        notes: &crate::modules::notes::NotesManager,
+        editor_visible: bool,
     ) -> Result<()> {
-        let left_w = 260.0;
-        let right_left = rect.left + left_w + 12.0;
+        let left_w = 232.0;
+        let gap = 12.0;
+        let right_left = rect.left + left_w + gap;
 
-        // Left Pane: Notes list
+        // --- LEFT CARD (232px) ---
         let left_rect = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: rect.left,
@@ -1811,25 +1820,24 @@ impl D2DRenderer {
         target.FillRoundedRectangle(&left_rect, card_bg);
         target.DrawRoundedRectangle(&left_rect, card_border, 1.0, None);
 
-        // Header in left pane with "+ New Note"
+        // Header: "NOTES" label (left) & "+ New" button (right)
         if let Ok(mfmt) = self.get_meta_format() {
-            let count_str = format!("ALL NOTES ({})", prod.notes.len());
-            let wide: Vec<u16> = count_str.encode_utf16().collect();
+            let wide: Vec<u16> = "NOTES".encode_utf16().collect();
             let header_r = D2D_RECT_F {
-                left: rect.left + 16.0,
-                top: rect.top + 16.0,
-                right: rect.left + left_w - 70.0,
+                left: rect.left + 14.0,
+                top: rect.top + 14.0,
+                right: rect.left + 100.0,
                 bottom: rect.top + 34.0,
             };
             target.DrawText(&wide, mfmt, &header_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
-        // "+ Note" button in left pane header
+        // "+ New" button
         let add_btn_r = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: rect.left + left_w - 68.0,
-                top: rect.top + 12.0,
-                right: rect.left + left_w - 14.0,
+                left: rect.left + left_w - 64.0,
+                top: rect.top + 10.0,
+                right: rect.left + left_w - 12.0,
                 bottom: rect.top + 34.0,
             },
             radiusX: 6.0,
@@ -1837,85 +1845,123 @@ impl D2DRenderer {
         };
         target.FillRoundedRectangle(&add_btn_r, accent);
         if let Ok(mfmt) = self.get_meta_format() {
-            let wide: Vec<u16> = "+ Note".encode_utf16().collect();
+            let wide: Vec<u16> = "+ New".encode_utf16().collect();
             let btn_txt_r = D2D_RECT_F {
                 left: add_btn_r.rect.left + 8.0,
-                top: add_btn_r.rect.top + 4.0,
-                right: add_btn_r.rect.right,
+                top: add_btn_r.rect.top + 5.0,
+                right: add_btn_r.rect.right - 8.0,
                 bottom: add_btn_r.rect.bottom,
             };
             target.DrawText(&wide, mfmt, &btn_txt_r, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
-        let mut cur_y = rect.top + 48.0;
-        if prod.notes.is_empty() {
+        // Notes list rows (38px high, 2px gap)
+        let list_top = rect.top + 42.0;
+        let row_h = 38.0;
+        let row_gap = 2.0;
+        let filtered = notes.filtered_notes();
+
+        if filtered.is_empty() {
             if let Ok(sfmt) = self.get_sub_format() {
                 let wide: Vec<u16> = "No notes yet".encode_utf16().collect();
                 let empty_r = D2D_RECT_F {
-                    left: rect.left + 20.0,
-                    top: cur_y + 24.0,
-                    right: rect.left + left_w - 20.0,
-                    bottom: cur_y + 60.0,
+                    left: rect.left + 14.0,
+                    top: list_top + 20.0,
+                    right: rect.left + left_w - 14.0,
+                    bottom: list_top + 60.0,
                 };
                 target.DrawText(&wide, sfmt, &empty_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
         } else {
-            for (idx, note) in prod.notes.iter().take(5).enumerate() {
-                let note_r = D2D1_ROUNDED_RECT {
+            let mut cur_y = list_top;
+            for note in filtered.iter().take(5) {
+                let is_selected = Some(note.id) == notes.selected_id;
+                let row_r = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
-                        left: rect.left + 10.0,
+                        left: rect.left + 8.0,
                         top: cur_y,
-                        right: rect.left + left_w - 10.0,
-                        bottom: cur_y + 32.0,
+                        right: rect.left + left_w - 8.0,
+                        bottom: cur_y + row_h,
                     },
-                    radiusX: 6.0,
-                    radiusY: 6.0,
+                    radiusX: 8.0,
+                    radiusY: 8.0,
                 };
-                let is_selected = Some(note.id) == prod.selected_note_id || (prod.selected_note_id.is_none() && idx == 0);
+
                 if is_selected {
                     let sel_brush = target.CreateSolidColorBrush(
-                        &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 },
+                        &D2D1_COLOR_F { r: 0.10, g: 0.10, b: 0.10, a: 1.0 }, // #1A1A1A approx
                         None,
                     )?;
-                    target.FillRoundedRectangle(&note_r, &sel_brush);
+                    target.FillRoundedRectangle(&row_r, &sel_brush);
                 }
 
-                // Checkbox circle
-                let check_cx = note_r.rect.left + 14.0;
-                let check_cy = note_r.rect.top + 16.0;
-                let check_circle = D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: check_cx, y: check_cy },
-                    radiusX: 5.5,
-                    radiusY: 5.5,
-                };
-                if note.is_completed {
-                    target.FillEllipse(&check_circle, accent);
+                // Line 1: Title (or Untitled in grey) + Pin indicator
+                let title_text = note.display_title();
+                let (title_disp, title_is_empty) = if title_text.is_empty() {
+                    ("Untitled".to_string(), true)
+                } else if title_text.len() > 18 {
+                    (format!("{}...", &title_text[..16]), false)
                 } else {
-                    target.DrawEllipse(&check_circle, secondary, 1.2, None);
-                }
+                    (title_text, false)
+                };
 
                 if let Ok(bfmt) = self.get_body_format() {
-                    let preview = if note.content.len() > 24 {
-                        format!("{}...", &note.content[..22])
-                    } else {
-                        note.content.clone()
-                    };
-                    let wide: Vec<u16> = preview.encode_utf16().collect();
+                    let wide: Vec<u16> = title_disp.encode_utf16().collect();
                     let t_rect = D2D_RECT_F {
-                        left: check_cx + 12.0,
-                        top: note_r.rect.top + 6.0,
-                        right: note_r.rect.right - 10.0,
-                        bottom: note_r.rect.bottom,
+                        left: row_r.rect.left + 8.0,
+                        top: cur_y + 3.0,
+                        right: row_r.rect.right - 24.0,
+                        bottom: cur_y + 20.0,
                     };
-                    let brush = if is_selected { white } else { secondary };
+                    let brush = if title_is_empty { secondary } else if is_selected { white } else { white };
                     target.DrawText(&wide, bfmt, &t_rect, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 }
 
-                cur_y += 36.0;
+                if note.pinned {
+                    // Small pin dot or indicator
+                    let pin_dot = D2D1_ELLIPSE {
+                        point: D2D_POINT_2F { x: row_r.rect.right - 12.0, y: cur_y + 11.0 },
+                        radiusX: 3.0,
+                        radiusY: 3.0,
+                    };
+                    target.FillEllipse(&pin_dot, accent);
+                }
+
+                // Line 2: Grey 11px preview & relative time
+                let preview_text = note.preview();
+                let prev_disp = if preview_text.len() > 16 {
+                    format!("{}...", &preview_text[..14])
+                } else {
+                    preview_text
+                };
+
+                let rel_time = crate::modules::notes::relative_time(note.updated);
+
+                if let Ok(sfmt) = self.get_sub_format() {
+                    let wide_prev: Vec<u16> = prev_disp.encode_utf16().collect();
+                    let p_rect = D2D_RECT_F {
+                        left: row_r.rect.left + 8.0,
+                        top: cur_y + 20.0,
+                        right: row_r.rect.right - 42.0,
+                        bottom: cur_y + 35.0,
+                    };
+                    target.DrawText(&wide_prev, sfmt, &p_rect, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                    let wide_time: Vec<u16> = rel_time.encode_utf16().collect();
+                    let time_rect = D2D_RECT_F {
+                        left: row_r.rect.right - 40.0,
+                        top: cur_y + 20.0,
+                        right: row_r.rect.right - 6.0,
+                        bottom: cur_y + 35.0,
+                    };
+                    target.DrawText(&wide_time, sfmt, &time_rect, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                }
+
+                cur_y += row_h + row_gap;
             }
         }
 
-        // Right Pane: Editor View
+        // --- RIGHT CARD (492px) ---
         let right_rect = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
                 left: right_left,
@@ -1929,130 +1975,173 @@ impl D2DRenderer {
         target.FillRoundedRectangle(&right_rect, card_bg);
         target.DrawRoundedRectangle(&right_rect, card_border, 1.0, None);
 
-        let active_note = prod.notes.iter().find(|n| Some(n.id) == prod.selected_note_id).or_else(|| prod.notes.first());
-
-        if let Some(note) = active_note {
-            if let Ok(mfmt) = self.get_meta_format() {
-                let status_str = if prod.editing_note {
-                    "EDITING NOTE · TYPE & PRESS ENTER TO SAVE"
-                } else if note.is_completed {
-                    "COMPLETED TASK · CLICK TO UNCHECK"
-                } else {
-                    "ACTIVE TASK · CLICK 'EDIT' OR TYPE"
-                };
-                let wide: Vec<u16> = status_str.encode_utf16().collect();
-                let m_r = D2D_RECT_F {
-                    left: right_left + 24.0,
-                    top: rect.top + 16.0,
-                    right: right_left + 280.0,
-                    bottom: rect.top + 34.0,
-                };
-                target.DrawText(&wide, mfmt, &m_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
-
-            // Edit / Save Note Button
-            let edit_btn_r = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: rect.right - 140.0,
-                    top: rect.top + 12.0,
-                    right: rect.right - 80.0,
-                    bottom: rect.top + 34.0,
+        // If editor has focus / is visible, show focus ring (1px theme accent at 30%)
+        if editor_visible {
+            let ring_brush = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: accent.GetColor().r,
+                    g: accent.GetColor().g,
+                    b: accent.GetColor().b,
+                    a: 0.30,
                 },
-                radiusX: 6.0,
-                radiusY: 6.0,
-            };
-            target.FillRoundedRectangle(&edit_btn_r, accent);
-            if let Ok(mfmt) = self.get_meta_format() {
-                let btn_text = if prod.editing_note { "Save" } else { "Edit" };
-                let wide: Vec<u16> = btn_text.encode_utf16().collect();
-                let tr = D2D_RECT_F {
-                    left: edit_btn_r.rect.left + 16.0,
-                    top: edit_btn_r.rect.top + 4.0,
-                    right: edit_btn_r.rect.right,
-                    bottom: edit_btn_r.rect.bottom,
-                };
-                target.DrawText(&wide, mfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
-
-            // Delete / Cancel Note Button
-            let del_btn_r = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: rect.right - 70.0,
-                    top: rect.top + 12.0,
-                    right: rect.right - 16.0,
-                    bottom: rect.top + 34.0,
-                },
-                radiusX: 6.0,
-                radiusY: 6.0,
-            };
-            let del_bg = target.CreateSolidColorBrush(
-                &D2D1_COLOR_F { r: 0.16, g: 0.16, b: 0.18, a: 1.0 },
                 None,
             )?;
-            target.FillRoundedRectangle(&del_btn_r, &del_bg);
-            target.DrawRoundedRectangle(&del_btn_r, card_border, 1.0, None);
-            if let Ok(mfmt) = self.get_meta_format() {
-                let del_text = if prod.editing_note { "Cancel" } else { "Delete" };
-                let wide: Vec<u16> = del_text.encode_utf16().collect();
-                let tr = D2D_RECT_F {
-                    left: del_btn_r.rect.left + 10.0,
-                    top: del_btn_r.rect.top + 4.0,
+            target.DrawRoundedRectangle(&right_rect, &ring_brush, 1.5, None);
+        }
+
+        let sel_note = notes.selected_note();
+
+        if let Some(note) = sel_note {
+            // If editor popup is not active, draw D2D preview of title & body
+            if !editor_visible {
+                // Title
+                if let Ok(tfmt) = self.get_title_format() {
+                    let title_disp = if note.title.trim().is_empty() {
+                        "Title".to_string()
+                    } else {
+                        note.title.clone()
+                    };
+                    let wide: Vec<u16> = title_disp.encode_utf16().collect();
+                    let t_rect = D2D_RECT_F {
+                        left: right_left + 16.0,
+                        top: rect.top + 12.0,
+                        right: rect.right - 16.0,
+                        bottom: rect.top + 38.0,
+                    };
+                    let brush = if note.title.trim().is_empty() { secondary } else { white };
+                    target.DrawText(&wide, tfmt, &t_rect, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                }
+
+                // 1px divider
+                let div_y = rect.top + 42.0;
+                target.DrawLine(
+                    D2D_POINT_2F { x: right_left + 16.0, y: div_y },
+                    D2D_POINT_2F { x: rect.right - 16.0, y: div_y },
+                    card_border,
+                    1.0,
+                    None,
+                );
+
+                // Body area
+                if let Ok(bfmt) = self.get_body_format() {
+                    let body_disp = if note.body.trim().is_empty() {
+                        "Start typing…".to_string()
+                    } else {
+                        note.body.clone()
+                    };
+                    let wide: Vec<u16> = body_disp.encode_utf16().collect();
+                    let b_rect = D2D_RECT_F {
+                        left: right_left + 16.0,
+                        top: div_y + 8.0,
+                        right: rect.right - 16.0,
+                        bottom: rect.bottom - 36.0,
+                    };
+                    let brush = if note.body.trim().is_empty() { secondary } else { white };
+                    target.DrawText(&wide, bfmt, &b_rect, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                }
+            }
+
+            // Footer (24px)
+            let footer_y = rect.bottom - 28.0;
+            if let Ok(sfmt) = self.get_sub_format() {
+                let edited_str = format!("Edited {}", crate::modules::notes::relative_time(note.updated));
+                let wide: Vec<u16> = edited_str.encode_utf16().collect();
+                let f_rect = D2D_RECT_F {
+                    left: right_left + 16.0,
+                    top: footer_y + 2.0,
+                    right: right_left + 180.0,
+                    bottom: rect.bottom - 4.0,
+                };
+                target.DrawText(&wide, sfmt, &f_rect, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            // Footer action buttons: Pin, Delete (Right side)
+            let del_btn_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.right - 36.0,
+                    top: footer_y,
+                    right: rect.right - 12.0,
+                    bottom: footer_y + 24.0,
+                },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            // Trash icon
+            if let Ok(sfmt) = self.get_sub_format() {
+                let wide: Vec<u16> = "🗑".encode_utf16().collect();
+                let t_r = D2D_RECT_F {
+                    left: del_btn_r.rect.left + 5.0,
+                    top: del_btn_r.rect.top + 2.0,
                     right: del_btn_r.rect.right,
                     bottom: del_btn_r.rect.bottom,
                 };
-                target.DrawText(&wide, mfmt, &tr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                target.DrawText(&wide, sfmt, &t_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
 
-            if prod.editing_note {
-                // Render editable text box with active typing cursor
-                let box_r = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: right_left + 20.0,
-                        top: rect.top + 46.0,
-                        right: rect.right - 20.0,
-                        bottom: rect.bottom - 20.0,
-                    },
-                    radiusX: 8.0,
-                    radiusY: 8.0,
-                };
-                let edit_bg = target.CreateSolidColorBrush(
-                    &D2D1_COLOR_F { r: 0.08, g: 0.08, b: 0.10, a: 1.0 },
-                    None,
-                )?;
-                target.FillRoundedRectangle(&box_r, &edit_bg);
-                target.DrawRoundedRectangle(&box_r, accent, 1.5, None);
-
-                if let Ok(tfmt) = self.get_title_format() {
-                    let display_text = format!("{}|", prod.edit_buffer);
-                    let wide: Vec<u16> = display_text.encode_utf16().collect();
-                    let t_r = D2D_RECT_F {
-                        left: box_r.rect.left + 14.0,
-                        top: box_r.rect.top + 12.0,
-                        right: box_r.rect.right - 14.0,
-                        bottom: box_r.rect.bottom - 12.0,
-                    };
-                    target.DrawText(&wide, tfmt, &t_r, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                }
-            } else if let Ok(tfmt) = self.get_title_format() {
-                let wide: Vec<u16> = note.content.encode_utf16().collect();
+            // Pin toggle icon button
+            let pin_btn_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.right - 68.0,
+                    top: footer_y,
+                    right: rect.right - 44.0,
+                    bottom: footer_y + 24.0,
+                },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            if let Ok(sfmt) = self.get_sub_format() {
+                let wide: Vec<u16> = if note.pinned { "📌".encode_utf16().collect() } else { "📍".encode_utf16().collect() };
                 let t_r = D2D_RECT_F {
-                    left: right_left + 24.0,
-                    top: rect.top + 48.0,
-                    right: rect.right - 24.0,
-                    bottom: rect.bottom - 24.0,
+                    left: pin_btn_r.rect.left + 4.0,
+                    top: pin_btn_r.rect.top + 2.0,
+                    right: pin_btn_r.rect.right,
+                    bottom: pin_btn_r.rect.bottom,
                 };
-                target.DrawText(&wide, tfmt, &t_r, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                let brush = if note.pinned { accent } else { secondary };
+                target.DrawText(&wide, sfmt, &t_r, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
         } else {
+            // Empty state (no notes)
             if let Ok(sfmt) = self.get_sub_format() {
-                let wide: Vec<u16> = "Click '+ Note' to add a quick note or task. Notes automatically persist to notes.json.".encode_utf16().collect();
-                let desc_r = D2D_RECT_F {
-                    left: right_left + 24.0,
-                    top: rect.top + 50.0,
-                    right: rect.right - 24.0,
-                    bottom: rect.top + 100.0,
+                let wide: Vec<u16> = "No notes yet\nClick '+ New' to create one".encode_utf16().collect();
+                let empty_r = D2D_RECT_F {
+                    left: right_left + 40.0,
+                    top: rect.top + 70.0,
+                    right: rect.right - 40.0,
+                    bottom: rect.top + 130.0,
                 };
-                target.DrawText(&wide, sfmt, &desc_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                target.DrawText(&wide, sfmt, &empty_r, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        }
+
+        // Toast: "Note deleted · Undo"
+        if let Some((msg, _)) = &notes.toast_message {
+            let toast_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: right_left + 16.0,
+                    top: rect.bottom - 44.0,
+                    right: right_left + 220.0,
+                    bottom: rect.bottom - 12.0,
+                },
+                radiusX: 8.0,
+                radiusY: 8.0,
+            };
+            let toast_bg = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.12, a: 0.95 },
+                None,
+            )?;
+            target.FillRoundedRectangle(&toast_r, &toast_bg);
+            target.DrawRoundedRectangle(&toast_r, accent, 1.0, None);
+
+            if let Ok(sfmt) = self.get_sub_format() {
+                let wide: Vec<u16> = msg.encode_utf16().collect();
+                let t_r = D2D_RECT_F {
+                    left: toast_r.rect.left + 12.0,
+                    top: toast_r.rect.top + 6.0,
+                    right: toast_r.rect.right - 12.0,
+                    bottom: toast_r.rect.bottom - 6.0,
+                };
+                target.DrawText(&wide, sfmt, &t_r, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
         }
 

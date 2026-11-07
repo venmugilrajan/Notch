@@ -3,6 +3,7 @@ pub mod converters;
 pub mod drop_server;
 pub mod links;
 pub mod media;
+pub mod notes;
 pub mod notifications;
 pub mod power;
 pub mod productivity;
