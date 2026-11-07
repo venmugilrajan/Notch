@@ -11,6 +11,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
+use windows::Win32::Graphics::Imaging::*;
+use windows::Win32::System::Com::*;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum NotchTab {
@@ -59,6 +61,9 @@ pub struct D2DRenderer {
     gauge_format: Option<IDWriteTextFormat>,
     gauge_small_format: Option<IDWriteTextFormat>,
     tooltip_format: Option<IDWriteTextFormat>,
+    imaging_factory: Option<IWICImagingFactory>,
+    current_art_hash: u64,
+    current_art_bitmap: Option<ID2D1Bitmap>,
 }
 
 impl D2DRenderer {
@@ -73,6 +78,10 @@ impl D2DRenderer {
 
         let icon_painter = IconPainter::new(&factory)?;
 
+        let imaging_factory = unsafe {
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()
+        };
+
         Ok(Self {
             factory,
             write_factory,
@@ -86,6 +95,9 @@ impl D2DRenderer {
             gauge_format: None,
             gauge_small_format: None,
             tooltip_format: None,
+            imaging_factory,
+            current_art_hash: 0,
+            current_art_bitmap: None,
         })
     }
 
@@ -379,6 +391,7 @@ impl D2DRenderer {
         drop_srv: &crate::modules::drop_server::DropServer,
         notes: &crate::modules::notes::NotesManager,
         notes_editing: bool,
+        calendar_offset: i32,
         enabled_modules: &crate::config::EnabledModules,
         time_format_24h: bool,
         shrink_mode: bool,
@@ -583,7 +596,7 @@ impl D2DRenderer {
                         self.render_world_clock_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush)?;
                     }
                     NotchTab::Calendar => {
-                        self.render_calendar_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush)?;
+                        self.render_calendar_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, calendar_offset)?;
                     }
                     NotchTab::Weather => {
                         self.render_weather_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush)?;
@@ -1334,12 +1347,74 @@ impl D2DRenderer {
             None,
         )?;
         target.FillRoundedRectangle(&art_rect, &art_bg);
-        target.DrawRoundedRectangle(&art_rect, card_border, 1.0, None);
 
-        // Draw note icon in album art box
-        let art_cx = art_left + (art_size / 2.0);
-        let art_cy = art_top + (art_size / 2.0);
-        let _ = self.icon_painter.draw_icon(target, &self.factory, 12, art_cx, art_cy, secondary);
+        // Check if we have album art bytes
+        let mut drew_artwork = false;
+        if let Some(bytes) = &media.thumbnail_bytes {
+            if !bytes.is_empty() {
+                // Compute hash to see if cached bitmap can be reused
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                let new_hash = hasher.finish();
+
+                if self.current_art_hash != new_hash || self.current_art_bitmap.is_none() {
+                    self.current_art_bitmap = None;
+                    self.current_art_hash = new_hash;
+                    if let Some(ref wic_factory) = self.imaging_factory {
+                        unsafe {
+                            if let Ok(stream) = wic_factory.CreateStream() {
+                                if stream.InitializeFromMemory(bytes.as_slice()).is_ok() {
+                                    if let Ok(decoder) = wic_factory.CreateDecoderFromStream(
+                                        &stream,
+                                        std::ptr::null(),
+                                        WICDecodeOptions(0),
+                                    ) {
+                                        if let Ok(frame) = decoder.GetFrame(0) {
+                                            if let Ok(converter) = wic_factory.CreateFormatConverter() {
+                                                if converter.Initialize(
+                                                    &frame,
+                                                    &GUID_WICPixelFormat32bppPBGRA,
+                                                    WICBitmapDitherTypeNone,
+                                                    None,
+                                                    0.0,
+                                                    WICBitmapPaletteTypeCustom,
+                                                ).is_ok() {
+                                                    if let Ok(bmp) = target.CreateBitmapFromWicBitmap(&converter, None) {
+                                                        self.current_art_bitmap = Some(bmp);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(ref bmp) = self.current_art_bitmap {
+                    // Draw clipped to rounded rect or direct
+                    target.DrawBitmap(
+                        bmp,
+                        Some(&art_rect.rect),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                    drew_artwork = true;
+                }
+            }
+        }
+
+        if !drew_artwork {
+            // Draw default music note icon in album art box
+            let art_cx = art_left + (art_size / 2.0);
+            let art_cy = art_top + (art_size / 2.0);
+            let _ = self.icon_painter.draw_icon(target, &self.factory, 12, art_cx, art_cy, secondary);
+        }
+
+        target.DrawRoundedRectangle(&art_rect, card_border, 1.0, None);
 
         // Right details area
         let details_left = art_left + art_size + 28.0;
@@ -2445,7 +2520,7 @@ impl D2DRenderer {
         Ok(())
     }
 
-    // Real Month Calendar Grid with Current Day Highlight
+    // Real Month Calendar Grid with Current Day Highlight and Month Navigation
     unsafe fn render_calendar_page(
         &mut self,
         target: &ID2D1DCRenderTarget,
@@ -2455,6 +2530,7 @@ impl D2DRenderer {
         white: &ID2D1SolidColorBrush,
         secondary: &ID2D1SolidColorBrush,
         accent: &ID2D1SolidColorBrush,
+        offset: i32,
     ) -> Result<()> {
         let card_round = D2D1_ROUNDED_RECT {
             rect: *rect,
@@ -2466,14 +2542,19 @@ impl D2DRenderer {
 
         let st = windows::Win32::System::SystemInformation::GetLocalTime();
 
-        // Month Header
-        let month_name = match st.wMonth {
+        // Compute displayed year and month from offset
+        let total_months = (st.wYear as i32 * 12) + (st.wMonth as i32 - 1) + offset;
+        let disp_year = (total_months / 12) as u16;
+        let disp_month = ((total_months % 12) + 1) as u16;
+
+        let month_name = match disp_month {
             1 => "January", 2 => "February", 3 => "March", 4 => "April", 5 => "May", 6 => "June",
             7 => "July", 8 => "August", 9 => "September", 10 => "October", 11 => "November", 12 => "December",
             _ => "",
         };
-        let header_str = format!("{} {}", month_name, st.wYear);
+        let header_str = format!("{} {}", month_name, disp_year);
 
+        // Month Header text
         if let Ok(tfmt) = self.get_title_format() {
             let wide: Vec<u16> = header_str.encode_utf16().collect();
             let hr = D2D_RECT_F {
@@ -2483,6 +2564,59 @@ impl D2DRenderer {
                 bottom: rect.top + 38.0,
             };
             target.DrawText(&wide, tfmt, &hr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // Navigation Arrows: [<] [>] [Today]
+        let btn_prev_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.right - 100.0,
+                top: rect.top + 12.0,
+                right: rect.right - 72.0,
+                bottom: rect.top + 36.0,
+            },
+            radiusX: 6.0,
+            radiusY: 6.0,
+        };
+        let btn_bg = target.CreateSolidColorBrush(
+            &D2D1_COLOR_F { r: 0.14, g: 0.14, b: 0.16, a: 1.0 },
+            None,
+        )?;
+        target.FillRoundedRectangle(&btn_prev_r, &btn_bg);
+        target.DrawRoundedRectangle(&btn_prev_r, card_border, 1.0, None);
+
+        if let Ok(bfmt) = self.get_body_format() {
+            let prev_str: Vec<u16> = "‹".encode_utf16().collect();
+            let tr = D2D_RECT_F {
+                left: btn_prev_r.rect.left + 8.0,
+                top: btn_prev_r.rect.top + 2.0,
+                right: btn_prev_r.rect.right,
+                bottom: btn_prev_r.rect.bottom,
+            };
+            target.DrawText(&prev_str, bfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        let btn_next_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: rect.right - 64.0,
+                top: rect.top + 12.0,
+                right: rect.right - 36.0,
+                bottom: rect.top + 36.0,
+            },
+            radiusX: 6.0,
+            radiusY: 6.0,
+        };
+        target.FillRoundedRectangle(&btn_next_r, &btn_bg);
+        target.DrawRoundedRectangle(&btn_next_r, card_border, 1.0, None);
+
+        if let Ok(bfmt) = self.get_body_format() {
+            let next_str: Vec<u16> = "›".encode_utf16().collect();
+            let tr = D2D_RECT_F {
+                left: btn_next_r.rect.left + 8.0,
+                top: btn_next_r.rect.top + 2.0,
+                right: btn_next_r.rect.right,
+                bottom: btn_next_r.rect.bottom,
+            };
+            target.DrawText(&next_str, bfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
         }
 
         // Days of week header: Sun Mon Tue Wed Thu Fri Sat
@@ -2503,18 +2637,18 @@ impl D2DRenderer {
             }
         }
 
-        // Calculate days in month & starting weekday
-        let days_in_month = match st.wMonth {
-            2 => if (st.wYear % 4 == 0 && st.wYear % 100 != 0) || (st.wYear % 400 == 0) { 29 } else { 28 },
+        // Calculate days in displayed month
+        let days_in_month = match disp_month {
+            2 => if (disp_year % 4 == 0 && disp_year % 100 != 0) || (disp_year % 400 == 0) { 29 } else { 28 },
             4 | 6 | 9 | 11 => 30,
             _ => 31,
         };
 
-        // First day of current month weekday (Zeller's congruence simplified)
+        // First day of displayed month weekday (Zeller's congruence)
         let q = 1;
-        let m = if st.wMonth < 3 { st.wMonth as i32 + 12 } else { st.wMonth as i32 };
-        let k = if st.wMonth < 3 { (st.wYear - 1) % 100 } else { st.wYear % 100 } as i32;
-        let j = if st.wMonth < 3 { (st.wYear - 1) / 100 } else { st.wYear / 100 } as i32;
+        let m = if disp_month < 3 { disp_month as i32 + 12 } else { disp_month as i32 };
+        let k = if disp_month < 3 { (disp_year as i32 - 1) % 100 } else { disp_year as i32 % 100 };
+        let j = if disp_month < 3 { (disp_year as i32 - 1) / 100 } else { disp_year as i32 / 100 };
         let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
         let first_weekday = ((h + 5) % 7) as usize + 1; // 0 = Sunday, 1 = Monday...
 
@@ -2525,7 +2659,7 @@ impl D2DRenderer {
             let dx = rect.left + 24.0 + (col as f32 * col_w);
             let dy = rect.top + 70.0 + (row as f32 * 28.0);
 
-            let is_today = day == st.wDay as i32;
+            let is_today = offset == 0 && day == st.wDay as i32;
             if is_today {
                 let today_circle = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {

@@ -9,12 +9,15 @@ use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
+use windows::Storage::Streams::*;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaInfo {
     pub title: String,
     pub artist: String,
     pub is_playing: bool,
     pub has_media: bool,
+    pub thumbnail_bytes: Option<Vec<u8>>,
 }
 
 impl Default for MediaInfo {
@@ -24,6 +27,7 @@ impl Default for MediaInfo {
             artist: "".to_string(),
             is_playing: false,
             has_media: false,
+            thumbnail_bytes: None,
         }
     }
 }
@@ -133,6 +137,22 @@ fn wait_for_async<T: RuntimeType + 'static>(
     None
 }
 
+fn wait_for_async_load(
+    op: windows::Storage::Streams::DataReaderLoadOperation,
+) -> Option<u32> {
+    for _ in 0..20 {
+        if let Ok(status) = op.Status() {
+            if status == AsyncStatus::Completed {
+                return op.GetResults().ok();
+            } else if status == AsyncStatus::Error || status == AsyncStatus::Canceled {
+                return None;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
 fn query_smtc() -> Option<MediaInfo> {
     let req = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().ok()?;
     let mgr = wait_for_async(req)?;
@@ -205,11 +225,53 @@ fn query_smtc() -> Option<MediaInfo> {
         return None;
     }
 
+    let thumbnail_bytes = if let Ok(thumb_ref) = props.Thumbnail() {
+        if let Ok(stream_op) = thumb_ref.OpenReadAsync() {
+            if let Some(stream) = wait_for_async(stream_op) {
+                if let Ok(size) = stream.Size() {
+                    let len = size as usize;
+                    if len > 0 && len < 10 * 1024 * 1024 {
+                        let mut buf = vec![0u8; len];
+                        let reader = DataReader::CreateDataReader(&stream);
+                        if let Ok(reader) = reader {
+                            if let Ok(load_op) = reader.LoadAsync(size as u32) {
+                                if let Some(_) = wait_for_async_load(load_op) {
+                                    if reader.ReadBytes(&mut buf).is_ok() {
+                                        Some(buf)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     Some(MediaInfo {
         title,
         artist,
         is_playing,
         has_media: true,
+        thumbnail_bytes,
     })
 }
 
@@ -239,6 +301,7 @@ fn query_wasapi_audio() -> MediaInfo {
                                                             artist: "Active Audio Stream".to_string(),
                                                             is_playing: true,
                                                             has_media: true,
+                                                            thumbnail_bytes: None,
                                                         };
                                                     }
                                                 }
@@ -259,6 +322,7 @@ fn query_wasapi_audio() -> MediaInfo {
         artist: "Ready".to_string(),
         is_playing: false,
         has_media: false,
+        thumbnail_bytes: None,
     }
 }
 

@@ -75,6 +75,7 @@ pub struct WindowContext {
     pub links_mgr: LinksManager,
     pub drop_srv: DropServer,
     pub notes_mgr: NotesManager,
+    pub calendar_offset: i32,
     pub note_editor_hwnd: HWND,
     pub note_title_hwnd: HWND,
     pub note_body_hwnd: HWND,
@@ -197,6 +198,7 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
             links_mgr: LinksManager::new(),
             drop_srv: DropServer::new(),
             notes_mgr: NotesManager::new(),
+            calendar_offset: 0,
             note_editor_hwnd: HWND(std::ptr::null_mut()),
             note_title_hwnd: HWND(std::ptr::null_mut()),
             note_body_hwnd: HWND(std::ptr::null_mut()),
@@ -333,6 +335,7 @@ fn render_and_update_layered(hwnd: HWND, ctx: &mut WindowContext) {
         &ctx.drop_srv,
         &ctx.notes_mgr,
         ctx.note_editor_visible,
+        ctx.calendar_offset,
         &enabled_modules,
         time_format_24h,
         shrink_mode,
@@ -538,6 +541,48 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         return LRESULT(0);
                     } else if ((x as f32) - next_cx).abs() <= 16.0 {
                         MediaWatcher::next_track();
+                        return LRESULT(0);
+                    }
+                }
+            }
+
+            // Calendar month navigation clicks
+            if ctx.active_tab == NotchTab::Calendar {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_right = ctx.current_w as f32 - ear_r - 14.0;
+                let content_top = 48.0;
+                let fx = x as f32;
+                let fy = y as f32;
+
+                // Prev month button [‹] (content_right - 100.0 to content_right - 72.0, y: 12..36 relative to content_top)
+                let prev_l = content_right - 100.0;
+                let prev_r = content_right - 72.0;
+                let nav_t = content_top + 12.0;
+                let nav_b = content_top + 36.0;
+
+                if fx >= prev_l && fx <= prev_r && fy >= nav_t && fy <= nav_b {
+                    ctx.calendar_offset -= 1;
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Next month button [›] (content_right - 64.0 to content_right - 36.0, y: 12..36)
+                let next_l = content_right - 64.0;
+                let next_r = content_right - 36.0;
+
+                if fx >= next_l && fx <= next_r && fy >= nav_t && fy <= nav_b {
+                    ctx.calendar_offset += 1;
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Click header text to reset to current month (Today)
+                let head_l = ear_r + 14.0 + 24.0;
+                let head_r = head_l + 220.0;
+                if fx >= head_l && fx <= head_r && fy >= content_top + 14.0 && fy <= content_top + 38.0 {
+                    if ctx.calendar_offset != 0 {
+                        ctx.calendar_offset = 0;
+                        render_and_update_layered(hwnd, ctx);
                         return LRESULT(0);
                     }
                 }
