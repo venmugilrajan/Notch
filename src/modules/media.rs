@@ -45,7 +45,7 @@ impl MediaWatcher {
             loop {
                 let info = query_media();
                 let _ = tx.send(info);
-                thread::sleep(Duration::from_millis(1000));
+                thread::sleep(Duration::from_millis(500));
             }
         });
 

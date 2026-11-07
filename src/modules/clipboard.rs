@@ -6,6 +6,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Security::Cryptography::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::*;
+use windows::Win32::UI::Shell::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ClipboardItemType {
@@ -125,9 +126,27 @@ impl ClipboardManager {
                 return None;
             }
 
+            // Check for CF_HDROP (format 15) - Files/Images copied from Explorer or apps
+            let mut captured_file = None;
+            if IsClipboardFormatAvailable(15).is_ok() {
+                let handle = GetClipboardData(15);
+                if let Ok(hglobal) = handle {
+                    let hdrop = windows::Win32::UI::Shell::HDROP(hglobal.0);
+                    let count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+                    if count > 0 {
+                        let mut buf = [0u16; 512];
+                        let len = DragQueryFileW(hdrop, 0, Some(&mut buf));
+                        if len > 0 {
+                            let path_str = String::from_utf16_lossy(&buf[..len as usize]);
+                            captured_file = Some((path_str, count));
+                        }
+                    }
+                }
+            }
+
             // Check if CF_UNICODETEXT is available (format 13)
             let mut captured_text = None;
-            if IsClipboardFormatAvailable(13).is_ok() {
+            if captured_file.is_none() && IsClipboardFormatAvailable(13).is_ok() {
                 let handle = GetClipboardData(13);
                 if let Ok(hglobal) = handle {
                     let ptr = GlobalLock(HGLOBAL(hglobal.0));
@@ -146,7 +165,84 @@ impl ClipboardManager {
                 }
             }
 
+            // Check if CF_DIB (format 8) is available - Direct screenshot / copied bitmap
+            let mut captured_bitmap = false;
+            if captured_file.is_none() && captured_text.is_none() && IsClipboardFormatAvailable(8).is_ok() {
+                captured_bitmap = true;
+            }
+
             let _ = CloseClipboard();
+
+            if let Some((filepath, count)) = captured_file {
+                let path = std::path::Path::new(&filepath);
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                let is_img = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "webp" | "gif" | "ico");
+                let item_type = if is_img { ClipboardItemType::Image } else { ClipboardItemType::Text };
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or(&filepath);
+                
+                let preview = if count > 1 {
+                    format!("{} (+{} other files)", file_name, count - 1)
+                } else {
+                    file_name.to_string()
+                };
+
+                let extra_info = if is_img {
+                    format!("Image · {}", ext.to_uppercase())
+                } else {
+                    format!("{} files · Path", count)
+                };
+
+                if let Some(first) = self.items.first() {
+                    if first.text == filepath {
+                        return None;
+                    }
+                }
+
+                let item = ClipboardItem {
+                    id: self.next_id,
+                    item_type,
+                    text: filepath.clone(),
+                    preview,
+                    is_pinned: false,
+                    timestamp_label: "Just now".to_string(),
+                    date_group: "Today".to_string(),
+                    extra_info,
+                };
+                self.next_id += 1;
+                self.selected_item_id = Some(item.id);
+                self.items.insert(0, item);
+                if self.items.len() > self.max_items {
+                    if let Some(idx) = self.items.iter().rposition(|it| !it.is_pinned) {
+                        self.items.remove(idx);
+                    }
+                }
+                self.save_history();
+                return Some(filepath);
+            }
+
+            if captured_bitmap {
+                let text = format!("[Copied Bitmap Image #{}]", self.next_id);
+                let item = ClipboardItem {
+                    id: self.next_id,
+                    item_type: ClipboardItemType::Image,
+                    text: text.clone(),
+                    preview: "Screenshot / Copied Bitmap".to_string(),
+                    is_pinned: false,
+                    timestamp_label: "Just now".to_string(),
+                    date_group: "Today".to_string(),
+                    extra_info: "Bitmap Image".to_string(),
+                };
+                self.next_id += 1;
+                self.selected_item_id = Some(item.id);
+                self.items.insert(0, item);
+                if self.items.len() > self.max_items {
+                    if let Some(idx) = self.items.iter().rposition(|it| !it.is_pinned) {
+                        self.items.remove(idx);
+                    }
+                }
+                self.save_history();
+                return Some(text);
+            }
 
             if let Some(text) = captured_text {
                 // Avoid consecutive duplicates

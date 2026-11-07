@@ -13,6 +13,7 @@ use std::time::Instant;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::*;
@@ -30,6 +31,7 @@ pub const WM_SETTINGS_CHANGED: u32 = WM_USER + 200;
 const TIMER_ANIMATION_ID: usize = 1;
 const TIMER_AUTOHIDE_ID: usize = 2;
 const TIMER_LEAVE_COLLAPSE_ID: usize = 3;
+const TIMER_MEDIA_REFRESH_ID: usize = 4;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum NotchState {
@@ -173,7 +175,11 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
         context.tray = Some(tray);
         context.power_notifier = Some(PowerNotifier::register(hwnd));
 
+        let _ = AddClipboardFormatListener(hwnd);
+
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(context) as isize);
+
+        let _ = DragAcceptFiles(hwnd, true);
 
         let _ = RegisterHotKey(
             hwnd,
@@ -195,6 +201,7 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         let _ = SetTimer(hwnd, TIMER_AUTOHIDE_ID, 2000, None);
+        let _ = SetTimer(hwnd, TIMER_MEDIA_REFRESH_ID, 1000, None);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
@@ -321,6 +328,33 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
     let ctx = &mut *ctx_ptr;
+
+    if msg == WM_DROPFILES {
+        let hdrop = HDROP(wparam.0 as *mut _);
+        let count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+        for i in 0..count {
+            let mut buf = [0u16; 512];
+            let len = DragQueryFileW(hdrop, i, Some(&mut buf));
+            if len > 0 {
+                let path_str = String::from_utf16_lossy(&buf[..len as usize]);
+                ctx.prod_mgr.park_file(std::path::PathBuf::from(path_str));
+            }
+        }
+        DragFinish(hdrop);
+        if ctx.state == NotchState::Collapsed || ctx.state == NotchState::Collapsing {
+            start_expansion(hwnd, ctx);
+        }
+        ctx.active_tab = NotchTab::FileShelf;
+        render_and_update_layered(hwnd, ctx);
+        return LRESULT(0);
+    }
+
+    if msg == WM_CLIPBOARDUPDATE {
+        if let Some(_captured) = ctx.clipboard_mgr.on_clipboard_change(hwnd) {
+            render_and_update_layered(hwnd, ctx);
+        }
+        return LRESULT(0);
+    }
 
     if msg == WM_MOUSEMOVE {
         let x = (lparam.0 & 0xFFFF) as i32;
@@ -513,6 +547,107 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
             }
 
+            // Notes page interaction
+            if ctx.active_tab == NotchTab::Notes {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_left = ear_r + 14.0;
+                let content_top = 48.0;
+                let left_w = 260.0;
+                let fx = x as f32;
+                let fy = y as f32;
+
+                // "+ Note" button click in left pane header
+                let add_btn_left = content_left + left_w - 68.0;
+                let add_btn_top = content_top + 12.0;
+                if fx >= add_btn_left && fx <= content_left + left_w - 14.0 && fy >= add_btn_top && fy <= add_btn_top + 22.0 {
+                    let note_count = ctx.prod_mgr.notes.len() + 1;
+                    ctx.prod_mgr.add_note(&format!("New task or quick memo #{}", note_count));
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Checkbox or note selection click
+                let mut note_y = content_top + 48.0;
+                for note in ctx.prod_mgr.notes.clone().iter().take(5) {
+                    if fx >= content_left + 10.0 && fx <= content_left + left_w - 10.0 && fy >= note_y && fy <= note_y + 32.0 {
+                        let check_cx = content_left + 10.0 + 14.0;
+                        if (fx - check_cx).abs() <= 12.0 {
+                            // Toggle checkbox
+                            ctx.prod_mgr.toggle_note(note.id);
+                        }
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                    note_y += 36.0;
+                }
+            }
+
+            // File Shelf page interaction
+            if ctx.active_tab == NotchTab::FileShelf {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_left = ear_r + 14.0;
+                let content_top = 48.0;
+                let fx = x as f32;
+                let fy = y as f32;
+
+                let mut item_y = content_top + 50.0;
+                for (i, p) in ctx.prod_mgr.parked_files.clone().iter().take(5).enumerate() {
+                    if fx >= content_left + 24.0 && fx <= content_right && fy >= item_y && fy <= item_y + 24.0 {
+                        // Open file on click via ShellExecute
+                        let path_w: Vec<u16> = p.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+                        unsafe {
+                            windows::Win32::UI::Shell::ShellExecuteW(
+                                hwnd,
+                                w!("open"),
+                                PCWSTR(path_w.as_ptr()),
+                                PCWSTR::null(),
+                                PCWSTR::null(),
+                                windows::Win32::UI::WindowsAndMessaging::SW_SHOW,
+                            );
+                        }
+                        return LRESULT(0);
+                    }
+                    item_y += 28.0;
+                }
+            }
+
+            // Links page interaction
+            if ctx.active_tab == NotchTab::Links {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_left = ear_r + 14.0;
+                let fx = x as f32;
+                let fy = y as f32;
+
+                let chip_y = 48.0 + 46.0;
+                let b_top = chip_y + 42.0;
+                let tile_w = (content_right - content_left - 48.0 - 36.0) / 4.0;
+
+                let bookmarks = [
+                    "https://github.com",
+                    "https://youtube.com",
+                    "https://google.com",
+                    "https://chatgpt.com",
+                ];
+
+                for (i, url) in bookmarks.iter().enumerate() {
+                    let bx = content_left + 24.0 + (i as f32 * (tile_w + 12.0));
+                    if fx >= bx && fx <= bx + tile_w && fy >= b_top && fy <= b_top + 90.0 {
+                        let url_w: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+                        unsafe {
+                            windows::Win32::UI::Shell::ShellExecuteW(
+                                hwnd,
+                                w!("open"),
+                                PCWSTR(url_w.as_ptr()),
+                                PCWSTR::null(),
+                                PCWSTR::null(),
+                                windows::Win32::UI::WindowsAndMessaging::SW_SHOW,
+                            );
+                        }
+                        return LRESULT(0);
+                    }
+                }
+            }
+
             let dock_top = ctx.current_h - 56;
             if y >= dock_top {
                 let enabled_modules = {
@@ -574,6 +709,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             handle_animation_tick(hwnd, ctx);
         } else if wparam.0 == TIMER_AUTOHIDE_ID {
             check_fullscreen_state(hwnd);
+        } else if wparam.0 == TIMER_MEDIA_REFRESH_ID {
+            if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Media {
+                render_and_update_layered(hwnd, ctx);
+            }
         } else if wparam.0 == TIMER_LEAVE_COLLAPSE_ID {
             let _ = KillTimer(hwnd, TIMER_LEAVE_COLLAPSE_ID);
             if !ctx.is_hovered && !ctx.is_pinned && (ctx.state == NotchState::Expanded || ctx.state == NotchState::Expanding) {
@@ -648,7 +787,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     if msg == WM_DESTROY {
         let _ = KillTimer(hwnd, TIMER_ANIMATION_ID);
         let _ = KillTimer(hwnd, TIMER_AUTOHIDE_ID);
+        let _ = KillTimer(hwnd, TIMER_MEDIA_REFRESH_ID);
         let _ = KillTimer(hwnd, TIMER_LEAVE_COLLAPSE_ID);
+        let _ = RemoveClipboardFormatListener(hwnd);
         let _ = DeleteObject(ctx.dib_bitmap);
         let _ = DeleteDC(ctx.mem_dc);
         let _ = Box::from_raw(ctx_ptr);

@@ -586,6 +586,12 @@ impl D2DRenderer {
                     NotchTab::FileShelf => {
                         self.render_file_shelf_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush, prod)?;
                     }
+                    NotchTab::Converters => {
+                        self.render_converters_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush)?;
+                    }
+                    NotchTab::Links => {
+                        self.render_links_page(&target, &content_rect, &card_bg_brush, &card_border_brush, &white_brush, &secondary_brush, &accent_brush)?;
+                    }
                     _ => {
                         let card_round = D2D1_ROUNDED_RECT {
                             rect: content_rect,
@@ -1327,7 +1333,7 @@ impl D2DRenderer {
         let details_left = art_left + art_size + 28.0;
         let details_right = rect.right - 28.0;
 
-        if media.has_media && media.is_playing {
+        if media.has_media {
             // Track Title
             if let Ok(tfmt) = self.get_title_format() {
                 let wide: Vec<u16> = media.title.encode_utf16().collect();
@@ -1342,7 +1348,12 @@ impl D2DRenderer {
 
             // Artist Name
             if let Ok(sfmt) = self.get_sub_format() {
-                let wide: Vec<u16> = media.artist.encode_utf16().collect();
+                let artist_text = if media.artist.is_empty() {
+                    if media.is_playing { "Playing".to_string() } else { "Paused".to_string() }
+                } else {
+                    media.artist.clone()
+                };
+                let wide: Vec<u16> = artist_text.encode_utf16().collect();
                 let artist_r = D2D_RECT_F {
                     left: details_left,
                     top: art_top + 48.0,
@@ -2515,6 +2526,249 @@ impl D2DRenderer {
                     target.DrawText(&wide, bfmt, &lr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 }
                 cy += 28.0;
+            }
+        }
+
+        Ok(())
+    }
+
+    // Converters Page (Length, Temperature, Currency)
+    unsafe fn render_converters_page(
+        &mut self,
+        target: &ID2D1DCRenderTarget,
+        rect: &D2D_RECT_F,
+        card_bg: &ID2D1SolidColorBrush,
+        card_border: &ID2D1SolidColorBrush,
+        white: &ID2D1SolidColorBrush,
+        secondary: &ID2D1SolidColorBrush,
+        accent: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let card_round = D2D1_ROUNDED_RECT {
+            rect: *rect,
+            radiusX: 16.0,
+            radiusY: 16.0,
+        };
+        target.FillRoundedRectangle(&card_round, card_bg);
+        target.DrawRoundedRectangle(&card_round, card_border, 1.0, None);
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let wide: Vec<u16> = "LIVE UNIT & CURRENCY CONVERTERS".encode_utf16().collect();
+            let hr = D2D_RECT_F {
+                left: rect.left + 24.0,
+                top: rect.top + 20.0,
+                right: rect.right - 24.0,
+                bottom: rect.top + 36.0,
+            };
+            target.DrawText(&wide, mfmt, &hr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        let conv_cards = [
+            ("Length", "1 Meter (m)", "= 3.28084 Feet (ft)", "100 cm · 39.37 inches"),
+            ("Temperature", "20 °Celsius (°C)", "= 68.0 °Fahrenheit (°F)", "293.15 Kelvin (K)"),
+            ("Currency", "1 USD ($)", "≈ 0.92 EUR / ₹84.5 INR", "Real ECB reference rate"),
+        ];
+
+        let card_w = (rect.right - rect.left - 48.0 - 24.0) / 3.0;
+        let card_h = 130.0;
+        let top_y = rect.top + 50.0;
+
+        for (i, (cat, from, to, note)) in conv_cards.iter().enumerate() {
+            let cx = rect.left + 24.0 + (i as f32 * (card_w + 12.0));
+            let sub_round = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: cx,
+                    top: top_y,
+                    right: cx + card_w,
+                    bottom: top_y + card_h,
+                },
+                radiusX: 12.0,
+                radiusY: 12.0,
+            };
+            let sub_bg = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.14, a: 1.0 },
+                None,
+            )?;
+            target.FillRoundedRectangle(&sub_round, &sub_bg);
+            target.DrawRoundedRectangle(&sub_round, card_border, 1.0, None);
+
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = cat.to_uppercase().encode_utf16().collect();
+                let tr = D2D_RECT_F {
+                    left: cx + 16.0,
+                    top: top_y + 14.0,
+                    right: cx + card_w - 16.0,
+                    bottom: top_y + 28.0,
+                };
+                target.DrawText(&wide, mfmt, &tr, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            if let Ok(bfmt) = self.get_body_format() {
+                let wide: Vec<u16> = from.encode_utf16().collect();
+                let fr = D2D_RECT_F {
+                    left: cx + 16.0,
+                    top: top_y + 36.0,
+                    right: cx + card_w - 16.0,
+                    bottom: top_y + 56.0,
+                };
+                target.DrawText(&wide, bfmt, &fr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            if let Ok(tfmt) = self.get_title_format() {
+                let wide: Vec<u16> = to.encode_utf16().collect();
+                let tor = D2D_RECT_F {
+                    left: cx + 16.0,
+                    top: top_y + 58.0,
+                    right: cx + card_w - 16.0,
+                    bottom: top_y + 88.0,
+                };
+                target.DrawText(&wide, tfmt, &tor, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = note.encode_utf16().collect();
+                let nr = D2D_RECT_F {
+                    left: cx + 16.0,
+                    top: top_y + 96.0,
+                    right: cx + card_w - 16.0,
+                    bottom: top_y + 114.0,
+                };
+                target.DrawText(&wide, mfmt, &nr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        }
+
+        Ok(())
+    }
+
+    // Links & Bookmarks Page
+    unsafe fn render_links_page(
+        &mut self,
+        target: &ID2D1DCRenderTarget,
+        rect: &D2D_RECT_F,
+        card_bg: &ID2D1SolidColorBrush,
+        card_border: &ID2D1SolidColorBrush,
+        white: &ID2D1SolidColorBrush,
+        secondary: &ID2D1SolidColorBrush,
+        accent: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let card_round = D2D1_ROUNDED_RECT {
+            rect: *rect,
+            radiusX: 16.0,
+            radiusY: 16.0,
+        };
+        target.FillRoundedRectangle(&card_round, card_bg);
+        target.DrawRoundedRectangle(&card_round, card_border, 1.0, None);
+
+        if let Ok(mfmt) = self.get_meta_format() {
+            let wide: Vec<u16> = "QUICK LINKS & SEARCH ENGINES".encode_utf16().collect();
+            let hr = D2D_RECT_F {
+                left: rect.left + 24.0,
+                top: rect.top + 20.0,
+                right: rect.right - 24.0,
+                bottom: rect.top + 36.0,
+            };
+            target.DrawText(&wide, mfmt, &hr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+
+        // Search Engine Selector Chips
+        let engines = ["Google", "GitHub", "YouTube", "Stack Overflow", "ChatGPT"];
+        let mut cur_chip_x = rect.left + 24.0;
+        let chip_y = rect.top + 46.0;
+
+        for (i, name) in engines.iter().enumerate() {
+            let chip_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: cur_chip_x,
+                    top: chip_y,
+                    right: cur_chip_x + 90.0,
+                    bottom: chip_y + 28.0,
+                },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            if i == 0 {
+                target.FillRoundedRectangle(&chip_r, accent);
+            } else {
+                let c_bg = target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F { r: 0.14, g: 0.14, b: 0.16, a: 1.0 },
+                    None,
+                )?;
+                target.FillRoundedRectangle(&chip_r, &c_bg);
+                target.DrawRoundedRectangle(&chip_r, card_border, 1.0, None);
+            }
+
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = name.encode_utf16().collect();
+                let txt_r = D2D_RECT_F {
+                    left: cur_chip_x + 8.0,
+                    top: chip_y + 6.0,
+                    right: cur_chip_x + 86.0,
+                    bottom: chip_y + 24.0,
+                };
+                let brush = if i == 0 { white } else { secondary };
+                target.DrawText(&wide, mfmt, &txt_r, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+            cur_chip_x += 98.0;
+        }
+
+        // Saved Bookmarks Tiles
+        let bookmarks = [
+            ("GitHub", "https://github.com", "Code hosting & pull requests"),
+            ("YouTube", "https://youtube.com", "Videos and music streams"),
+            ("Google", "https://google.com", "Search and tools"),
+            ("ChatGPT", "https://chatgpt.com", "AI conversation & assistance"),
+        ];
+
+        let b_top = chip_y + 42.0;
+        let tile_w = (rect.right - rect.left - 48.0 - 36.0) / 4.0;
+
+        for (i, (title, url, desc)) in bookmarks.iter().enumerate() {
+            let bx = rect.left + 24.0 + (i as f32 * (tile_w + 12.0));
+            let tile_r = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: bx,
+                    top: b_top,
+                    right: bx + tile_w,
+                    bottom: b_top + 90.0,
+                },
+                radiusX: 10.0,
+                radiusY: 10.0,
+            };
+            let tile_bg = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 0.11, g: 0.11, b: 0.13, a: 1.0 },
+                None,
+            )?;
+            target.FillRoundedRectangle(&tile_r, &tile_bg);
+            target.DrawRoundedRectangle(&tile_r, card_border, 1.0, None);
+
+            if let Ok(bfmt) = self.get_body_format() {
+                let wide: Vec<u16> = title.encode_utf16().collect();
+                let tr = D2D_RECT_F {
+                    left: bx + 12.0,
+                    top: b_top + 10.0,
+                    right: bx + tile_w - 12.0,
+                    bottom: b_top + 30.0,
+                };
+                target.DrawText(&wide, bfmt, &tr, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = url.encode_utf16().collect();
+                let ur = D2D_RECT_F {
+                    left: bx + 12.0,
+                    top: b_top + 32.0,
+                    right: bx + tile_w - 12.0,
+                    bottom: b_top + 48.0,
+                };
+                target.DrawText(&wide, mfmt, &ur, accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                let wide_d: Vec<u16> = desc.encode_utf16().collect();
+                let dr = D2D_RECT_F {
+                    left: bx + 12.0,
+                    top: b_top + 52.0,
+                    right: bx + tile_w - 12.0,
+                    bottom: b_top + 84.0,
+                };
+                target.DrawText(&wide_d, mfmt, &dr, secondary, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
         }
 
