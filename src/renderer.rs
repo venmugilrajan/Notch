@@ -382,6 +382,14 @@ impl D2DRenderer {
             return;
         }
 
+        if self.imaging_factory.is_none() {
+            self.imaging_factory = windows::Win32::System::Com::CoCreateInstance(
+                &windows::Win32::Graphics::Imaging::CLSID_WICImagingFactory,
+                None,
+                windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+            ).ok();
+        }
+
         if let Some(bytes) = &media.thumbnail_bytes {
             if !bytes.is_empty() {
                 use std::hash::{Hash, Hasher};
@@ -397,17 +405,40 @@ impl D2DRenderer {
                                 if let Ok(decoder) = wic_factory.CreateDecoderFromStream(
                                     &stream,
                                     std::ptr::null(),
-                                    WICDecodeOptions(0),
+                                    windows::Win32::Graphics::Imaging::WICDecodeOptions(0),
                                 ) {
                                     if let Ok(frame) = decoder.GetFrame(0) {
+                                        let mut ow = 0u32;
+                                        let mut oh = 0u32;
+                                        let _ = frame.GetSize(&mut ow, &mut oh);
+
+                                        let (tw, th) = if ow > 128 || oh > 128 {
+                                            if ow >= oh {
+                                                (128, ((oh as f32 / ow as f32) * 128.0).round().max(1.0) as u32)
+                                            } else {
+                                                (((ow as f32 / oh as f32) * 128.0).round().max(1.0) as u32, 128)
+                                            }
+                                        } else {
+                                            (ow.max(1), oh.max(1))
+                                        };
+
+                                        let mut scaled_source: Option<windows::Win32::Graphics::Imaging::IWICBitmapSource> = None;
+                                        if let Ok(scaler) = wic_factory.CreateBitmapScaler() {
+                                            if scaler.Initialize(&frame, tw, th, windows::Win32::Graphics::Imaging::WICBitmapInterpolationModeHighQualityCubic).is_ok() {
+                                                scaled_source = scaler.cast::<windows::Win32::Graphics::Imaging::IWICBitmapSource>().ok();
+                                            }
+                                        }
+
+                                        let source_to_convert: windows::Win32::Graphics::Imaging::IWICBitmapSource = scaled_source.unwrap_or_else(|| frame.cast::<windows::Win32::Graphics::Imaging::IWICBitmapSource>().unwrap());
+
                                         if let Ok(converter) = wic_factory.CreateFormatConverter() {
                                             if converter.Initialize(
-                                                &frame,
-                                                &GUID_WICPixelFormat32bppPBGRA,
-                                                WICBitmapDitherTypeNone,
+                                                &source_to_convert,
+                                                &windows::Win32::Graphics::Imaging::GUID_WICPixelFormat32bppPBGRA,
+                                                windows::Win32::Graphics::Imaging::WICBitmapDitherTypeNone,
                                                 None,
                                                 0.0,
-                                                WICBitmapPaletteTypeCustom,
+                                                windows::Win32::Graphics::Imaging::WICBitmapPaletteTypeCustom,
                                             ).is_ok() {
                                                 if let Ok(bmp) = target.CreateBitmapFromWicBitmap(&converter, None) {
                                                     self.current_art_bitmap = Some(bmp);
@@ -421,6 +452,9 @@ impl D2DRenderer {
                     }
                 }
             }
+        } else {
+            self.current_art_bitmap = None;
+            self.current_art_hash = 0;
         }
     }
 
@@ -457,6 +491,128 @@ impl D2DRenderer {
             brush.SetTransform(&xform);
             target.FillRoundedRectangle(dest_rect, &brush);
         }
+    }
+
+    pub unsafe fn draw_media_art_with_fallback(
+        &mut self,
+        target: &ID2D1DCRenderTarget,
+        rect: &D2D1_ROUNDED_RECT,
+        media: &MediaInfo,
+        border_brush: &ID2D1SolidColorBrush,
+        text_white: &ID2D1SolidColorBrush,
+        secondary: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let mut drew_artwork = false;
+        if let Some(ref bmp) = self.current_art_bitmap {
+            self.draw_rounded_bitmap(target, bmp, rect);
+            drew_artwork = true;
+        }
+
+        if !drew_artwork {
+            // Fallback 1: Gradient tile with app's initial
+            let app_name = media.source_app.to_lowercase();
+            let (col_top, col_bottom) = if app_name.contains("spotify") {
+                (
+                    D2D1_COLOR_F { r: 0.10, g: 0.42, b: 0.20, a: 1.0 },
+                    D2D1_COLOR_F { r: 0.04, g: 0.16, b: 0.08, a: 1.0 },
+                )
+            } else if app_name.contains("chrome") || app_name.contains("edge") {
+                (
+                    D2D1_COLOR_F { r: 0.14, g: 0.32, b: 0.52, a: 1.0 },
+                    D2D1_COLOR_F { r: 0.07, g: 0.14, b: 0.24, a: 1.0 },
+                )
+            } else if app_name.contains("apple") {
+                (
+                    D2D1_COLOR_F { r: 0.48, g: 0.12, b: 0.22, a: 1.0 },
+                    D2D1_COLOR_F { r: 0.18, g: 0.04, b: 0.08, a: 1.0 },
+                )
+            } else if app_name.contains("vlc") {
+                (
+                    D2D1_COLOR_F { r: 0.50, g: 0.26, b: 0.08, a: 1.0 },
+                    D2D1_COLOR_F { r: 0.20, g: 0.09, b: 0.03, a: 1.0 },
+                )
+            } else if !media.source_app.is_empty() {
+                (
+                    D2D1_COLOR_F { r: 0.24, g: 0.24, b: 0.32, a: 1.0 },
+                    D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.16, a: 1.0 },
+                )
+            } else {
+                (
+                    D2D1_COLOR_F { r: 0.16, g: 0.16, b: 0.18, a: 1.0 },
+                    D2D1_COLOR_F { r: 0.16, g: 0.16, b: 0.18, a: 1.0 },
+                )
+            };
+
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: col_top },
+                D2D1_GRADIENT_STOP { position: 1.0, color: col_bottom },
+            ];
+            if let Ok(stop_coll) = target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) {
+                let grad_props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: D2D_POINT_2F { x: rect.rect.left, y: rect.rect.top },
+                    endPoint: D2D_POINT_2F { x: rect.rect.left, y: rect.rect.bottom },
+                };
+                if let Ok(grad_brush) = target.CreateLinearGradientBrush(&grad_props, None, &stop_coll) {
+                    target.FillRoundedRectangle(rect, &grad_brush);
+                } else {
+                    let fallback_bg = target.CreateSolidColorBrush(&col_bottom, None)?;
+                    target.FillRoundedRectangle(rect, &fallback_bg);
+                }
+            } else {
+                let fallback_bg = target.CreateSolidColorBrush(&col_bottom, None)?;
+                target.FillRoundedRectangle(rect, &fallback_bg);
+            }
+
+            // Draw app initial or fallback music note
+            if media.has_media && !media.source_app.is_empty() {
+                let initial = media.source_app.chars().next().unwrap_or('P').to_uppercase().to_string();
+                if let Ok(tfmt) = self.get_title_format() {
+                    let wide: Vec<u16> = initial.encode_utf16().collect();
+                    let letter_rect = D2D_RECT_F {
+                        left: rect.rect.left,
+                        top: rect.rect.top + ((rect.rect.bottom - rect.rect.top - 24.0) / 2.0),
+                        right: rect.rect.right,
+                        bottom: rect.rect.bottom,
+                    };
+                    target.DrawText(&wide, tfmt, &letter_rect, text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                }
+            } else {
+                // Fallback 2: Music note icon
+                let cx = rect.rect.left + ((rect.rect.right - rect.rect.left) / 2.0);
+                let cy = rect.rect.top + ((rect.rect.bottom - rect.rect.top) / 2.0);
+                let _ = self.icon_painter.draw_icon(target, &self.factory, 12, cx, cy, secondary);
+            }
+        }
+
+        // Card border stroke
+        target.DrawRoundedRectangle(rect, border_brush, 0.8, None);
+
+        // Source App Badge in bottom-right corner
+        if media.has_media && !media.source_app.is_empty() {
+            let badge_cx = rect.rect.right - 6.0;
+            let badge_cy = rect.rect.bottom - 6.0;
+            let badge_r = 10.0;
+            let badge_bg = target.CreateSolidColorBrush(
+                &D2D1_COLOR_F { r: 0.12, g: 0.12, b: 0.15, a: 1.0 },
+                None,
+            )?;
+            target.FillEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: badge_cx, y: badge_cy }, radiusX: badge_r, radiusY: badge_r }, &badge_bg);
+            target.DrawEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: badge_cx, y: badge_cy }, radiusX: badge_r, radiusY: badge_r }, border_brush, 1.0, None);
+
+            let initial = media.source_app.chars().next().unwrap_or('P').to_uppercase().to_string();
+            if let Ok(mfmt) = self.get_meta_format() {
+                let wide: Vec<u16> = initial.encode_utf16().collect();
+                let b_rect = D2D_RECT_F {
+                    left: badge_cx - 7.0,
+                    top: badge_cy - 7.0,
+                    right: badge_cx + 7.0,
+                    bottom: badge_cy + 7.0,
+                };
+                target.DrawText(&wide, mfmt, &b_rect, text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            }
+        }
+
+        Ok(())
     }
 
     pub unsafe fn draw_equalizer_bars(
@@ -1195,17 +1351,7 @@ impl D2DRenderer {
                                 radiusX: 8.0,
                                 radiusY: 8.0,
                             };
-                            if let Some(ref bmp) = self.current_art_bitmap {
-                                self.draw_rounded_bitmap(target, bmp, &mini_art_rect);
-                            } else {
-                                let mini_art_bg = target.CreateSolidColorBrush(
-                                    &D2D1_COLOR_F { r: 0.14, g: 0.14, b: 0.16, a: 1.0 },
-                                    None,
-                                )?;
-                                target.FillRoundedRectangle(&mini_art_rect, &mini_art_bg);
-                                let _ = self.icon_painter.draw_icon(target, &self.factory, 12, card_left + 14.0 + (mini_art_size / 2.0), card_top + 28.0 + (mini_art_size / 2.0), secondary);
-                            }
-                            target.DrawRoundedRectangle(&mini_art_rect, card_border, 0.8, None);
+                            let _ = self.draw_media_art_with_fallback(target, &mini_art_rect, media, card_border, white, secondary);
 
                             // Right of mini album art: Track title and artist
                             let mini_details_left = card_left + 14.0 + mini_art_size + 10.0;
@@ -1689,49 +1835,7 @@ impl D2DRenderer {
             radiusY: 12.0,
         };
 
-        let mut drew_artwork = false;
-        if let Some(ref bmp) = self.current_art_bitmap {
-            self.draw_rounded_bitmap(target, bmp, &art_rect);
-            drew_artwork = true;
-        }
-
-        if !drew_artwork {
-            let art_bg = target.CreateSolidColorBrush(
-                &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 },
-                None,
-            )?;
-            target.FillRoundedRectangle(&art_rect, &art_bg);
-            let art_cx = art_left + (art_size / 2.0);
-            let art_cy = art_top + (art_size / 2.0);
-            let _ = self.icon_painter.draw_icon(target, &self.factory, 12, art_cx, art_cy, secondary);
-        }
-
-        target.DrawRoundedRectangle(&art_rect, card_border, 0.8, None);
-
-        // Source App Badge at bottom-right corner of album art
-        if media.has_media && !media.source_app.is_empty() {
-            let badge_cx = art_left + art_size - 6.0;
-            let badge_cy = art_top + art_size - 6.0;
-            let badge_r = 10.0;
-            let badge_bg = target.CreateSolidColorBrush(
-                &D2D1_COLOR_F { r: 0.15, g: 0.15, b: 0.18, a: 1.0 },
-                None,
-            )?;
-            target.FillEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: badge_cx, y: badge_cy }, radiusX: badge_r, radiusY: badge_r }, &badge_bg);
-            target.DrawEllipse(&D2D1_ELLIPSE { point: D2D_POINT_2F { x: badge_cx, y: badge_cy }, radiusX: badge_r, radiusY: badge_r }, card_border, 1.0, None);
-
-            let initial = media.source_app.chars().next().unwrap_or('P').to_uppercase().to_string();
-            if let Ok(mfmt) = self.get_meta_format() {
-                let wide: Vec<u16> = initial.encode_utf16().collect();
-                let b_rect = D2D_RECT_F {
-                    left: badge_cx - 7.0,
-                    top: badge_cy - 7.0,
-                    right: badge_cx + 7.0,
-                    bottom: badge_cy + 7.0,
-                };
-                target.DrawText(&wide, mfmt, &b_rect, white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
-        }
+        self.draw_media_art_with_fallback(target, &art_rect, media, card_border, white, secondary)?;
 
         // Details right of Album Art
         let info_left = art_left + art_size + 16.0;
@@ -3215,7 +3319,7 @@ impl D2DRenderer {
         card_border: &ID2D1SolidColorBrush,
         white: &ID2D1SolidColorBrush,
         secondary: &ID2D1SolidColorBrush,
-        accent: &ID2D1SolidColorBrush,
+        _accent: &ID2D1SolidColorBrush,
         prod: &ProductivityManager,
     ) -> Result<()> {
         let card_round = D2D1_ROUNDED_RECT {

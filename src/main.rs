@@ -16,6 +16,13 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 fn main() -> Result<()> {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        );
+    }
+
     // 1. Single Instance Check (Named Mutex)
     let mutex_name = w!("Global\\NotchBar_SingleInstance_Mutex_2026");
     let mutex = unsafe { CreateMutexW(None, true, mutex_name)? };
