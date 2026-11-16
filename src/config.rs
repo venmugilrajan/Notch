@@ -145,7 +145,7 @@ impl AppConfig {
 }
 
 pub fn sync_startup_registry(enabled: bool) {
-    use windows::core::{w, PCWSTR};
+    use windows::core::w;
     use windows::Win32::System::Registry::*;
 
     unsafe {

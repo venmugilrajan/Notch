@@ -66,6 +66,42 @@ fn main() {
                                 if let Ok(AsyncStatus::Completed) = prop_op.Status() {
                                     if let Ok(props) = prop_op.GetResults() {
                                         println!(" -> Title: {:?}, Artist: {:?}", props.Title(), props.Artist());
+                                        if let Ok(thumb) = props.Thumbnail() {
+                                            println!(" -> Got thumbnail reference: {:?}", thumb);
+                                            if let Ok(stream_op) = thumb.OpenReadAsync() {
+                                                println!(" -> OpenReadAsync returned stream_op");
+                                                for _ in 0..40 {
+                                                    if let Ok(AsyncStatus::Completed) = stream_op.Status() {
+                                                        if let Ok(stream) = stream_op.GetResults() {
+                                                            let sz = stream.Size().unwrap_or(0);
+                                                            println!(" -> Got stream! Size: {:?}", sz);
+                                                            let mut buf = vec![0u8; sz as usize];
+                                                            let reader = windows::Storage::Streams::DataReader::CreateDataReader(&stream);
+                                                            if let Ok(reader) = reader {
+                                                                if let Ok(load_op) = reader.LoadAsync(sz as u32) {
+                                                                    for _ in 0..40 {
+                                                                        if let Ok(AsyncStatus::Completed) = load_op.Status() {
+                                                                            let res = reader.ReadBytes(&mut buf);
+                                                                            println!(" -> ReadBytes result: {:?}, first 16 bytes: {:?}", res, &buf[..16.min(buf.len())]);
+                                                                            break;
+                                                                        }
+                                                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            println!(" -> stream_op.GetResults() failed");
+                                                        }
+                                                        break;
+                                                    }
+                                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                                }
+                                            } else {
+                                                println!(" -> OpenReadAsync returned Err");
+                                            }
+                                        } else {
+                                            println!(" -> props.Thumbnail() failed or returned None");
+                                        }
                                     }
                                     break;
                                 }

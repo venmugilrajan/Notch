@@ -18,6 +18,9 @@ pub struct MediaInfo {
     pub is_playing: bool,
     pub has_media: bool,
     pub thumbnail_bytes: Option<Vec<u8>>,
+    pub position_secs: u32,
+    pub duration_secs: u32,
+    pub source_app: String, // e.g. "Spotify", "Chrome", "AppleMusic"
 }
 
 impl Default for MediaInfo {
@@ -28,6 +31,9 @@ impl Default for MediaInfo {
             is_playing: false,
             has_media: false,
             thumbnail_bytes: None,
+            position_secs: 0,
+            duration_secs: 0,
+            source_app: String::new(),
         }
     }
 }
@@ -81,7 +87,7 @@ impl MediaWatcher {
 
 fn simulate_media_key(vk: VIRTUAL_KEY) {
     unsafe {
-        let mut inputs = [
+        let inputs = [
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
@@ -121,10 +127,13 @@ fn query_media() -> MediaInfo {
     query_wasapi_audio()
 }
 
+static CACHED_THUMBNAIL: std::sync::Mutex<Option<(String, String, Option<Vec<u8>>)>> =
+    std::sync::Mutex::new(None);
+
 fn wait_for_async<T: RuntimeType + 'static>(
     op: windows::Foundation::IAsyncOperation<T>,
 ) -> Option<T> {
-    for _ in 0..20 {
+    for _ in 0..30 {
         if let Ok(status) = op.Status() {
             if status == AsyncStatus::Completed {
                 return op.GetResults().ok();
@@ -132,7 +141,7 @@ fn wait_for_async<T: RuntimeType + 'static>(
                 return None;
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(10));
     }
     None
 }
@@ -140,7 +149,7 @@ fn wait_for_async<T: RuntimeType + 'static>(
 fn wait_for_async_load(
     op: windows::Storage::Streams::DataReaderLoadOperation,
 ) -> Option<u32> {
-    for _ in 0..20 {
+    for _ in 0..30 {
         if let Ok(status) = op.Status() {
             if status == AsyncStatus::Completed {
                 return op.GetResults().ok();
@@ -148,7 +157,7 @@ fn wait_for_async_load(
                 return None;
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(10));
     }
     None
 }
@@ -225,46 +234,52 @@ fn query_smtc() -> Option<MediaInfo> {
         return None;
     }
 
-    let thumbnail_bytes = if let Ok(thumb_ref) = props.Thumbnail() {
-        if let Ok(stream_op) = thumb_ref.OpenReadAsync() {
-            if let Some(stream) = wait_for_async(stream_op) {
-                if let Ok(size) = stream.Size() {
-                    let len = size as usize;
-                    if len > 0 && len < 10 * 1024 * 1024 {
-                        let mut buf = vec![0u8; len];
-                        let reader = DataReader::CreateDataReader(&stream);
-                        if let Ok(reader) = reader {
-                            if let Ok(load_op) = reader.LoadAsync(size as u32) {
-                                if let Some(_) = wait_for_async_load(load_op) {
-                                    if reader.ReadBytes(&mut buf).is_ok() {
-                                        Some(buf)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+    let thumbnail_bytes = {
+        let mut cache = CACHED_THUMBNAIL.lock().unwrap();
+        if let Some((ref cached_title, ref cached_artist, ref cached_bytes)) = *cache {
+            if cached_title == &title && cached_artist == &artist {
+                cached_bytes.clone()
             } else {
-                None
+                let bytes = fetch_thumbnail(&props);
+                *cache = Some((title.clone(), artist.clone(), bytes.clone()));
+                bytes
             }
         } else {
-            None
+            let bytes = fetch_thumbnail(&props);
+            *cache = Some((title.clone(), artist.clone(), bytes.clone()));
+            bytes
         }
-    } else {
-        None
     };
+
+    let (mut position_secs, mut duration_secs) = (0u32, 0u32);
+    if let Ok(timeline) = session.GetTimelineProperties() {
+        if let Ok(pos) = timeline.Position() {
+            position_secs = (pos.Duration / 10_000_000).max(0) as u32;
+        }
+        if let Ok(end) = timeline.EndTime() {
+            duration_secs = (end.Duration / 10_000_000).max(0) as u32;
+        }
+    }
+
+    let source_app = session
+        .SourceAppUserModelId()
+        .map(|id| {
+            let s = id.to_string().to_lowercase();
+            if s.contains("spotify") {
+                "Spotify".to_string()
+            } else if s.contains("chrome") {
+                "Chrome".to_string()
+            } else if s.contains("apple") {
+                "Apple Music".to_string()
+            } else if s.contains("edge") {
+                "Edge".to_string()
+            } else if s.contains("firefox") {
+                "Firefox".to_string()
+            } else {
+                "Media".to_string()
+            }
+        })
+        .unwrap_or_else(|_| "Media".to_string());
 
     Some(MediaInfo {
         title,
@@ -272,7 +287,35 @@ fn query_smtc() -> Option<MediaInfo> {
         is_playing,
         has_media: true,
         thumbnail_bytes,
+        position_secs,
+        duration_secs,
+        source_app,
     })
+}
+
+fn fetch_thumbnail(props: &GlobalSystemMediaTransportControlsSessionMediaProperties) -> Option<Vec<u8>> {
+    if let Ok(thumb_ref) = props.Thumbnail() {
+        if let Ok(stream_op) = thumb_ref.OpenReadAsync() {
+            if let Some(stream) = wait_for_async(stream_op) {
+                if let Ok(size) = stream.Size() {
+                    let len = size as usize;
+                    if len > 0 && len < 10 * 1024 * 1024 {
+                        let mut buf = vec![0u8; len];
+                        if let Ok(reader) = DataReader::CreateDataReader(&stream) {
+                            if let Ok(load_op) = reader.LoadAsync(size as u32) {
+                                if let Some(_) = wait_for_async_load(load_op) {
+                                    if reader.ReadBytes(&mut buf).is_ok() {
+                                        return Some(buf);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn query_wasapi_audio() -> MediaInfo {
@@ -302,6 +345,9 @@ fn query_wasapi_audio() -> MediaInfo {
                                                             is_playing: true,
                                                             has_media: true,
                                                             thumbnail_bytes: None,
+                                                            position_secs: 0,
+                                                            duration_secs: 0,
+                                                            source_app: proc_name,
                                                         };
                                                     }
                                                 }
@@ -323,6 +369,9 @@ fn query_wasapi_audio() -> MediaInfo {
         is_playing: false,
         has_media: false,
         thumbnail_bytes: None,
+        position_secs: 0,
+        duration_secs: 0,
+        source_app: String::new(),
     }
 }
 

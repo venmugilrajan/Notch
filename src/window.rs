@@ -76,6 +76,7 @@ pub struct WindowContext {
     pub drop_srv: DropServer,
     pub notes_mgr: NotesManager,
     pub calendar_offset: i32,
+    pub media_idle_ticks: u32,
     pub note_editor_hwnd: HWND,
     pub note_title_hwnd: HWND,
     pub note_body_hwnd: HWND,
@@ -199,6 +200,7 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
             drop_srv: DropServer::new(),
             notes_mgr: NotesManager::new(),
             calendar_offset: 0,
+            media_idle_ticks: 0,
             note_editor_hwnd: HWND(std::ptr::null_mut()),
             note_title_hwnd: HWND(std::ptr::null_mut()),
             note_body_hwnd: HWND(std::ptr::null_mut()),
@@ -243,7 +245,7 @@ pub fn run_app(config: Arc<Mutex<AppConfig>>) -> Result<()> {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
         let _ = SetTimer(hwnd, TIMER_AUTOHIDE_ID, 2000, None);
-        let _ = SetTimer(hwnd, TIMER_MEDIA_REFRESH_ID, 1000, None);
+        let _ = SetTimer(hwnd, TIMER_MEDIA_REFRESH_ID, 100, None);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
@@ -515,10 +517,67 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
             }
 
+            // Home Card 6 (Live Media Widget or Notes)
+            if ctx.active_tab == NotchTab::Home {
+                let ear_r = 14.0 + (ctx.animation_progress * 6.0);
+                let content_left = ear_r + 14.0;
+                let content_right = ctx.current_w as f32 - ear_r - 14.0;
+                let content_top = 48.0;
+                let content_bottom = ctx.current_h as f32 - 56.0;
+
+                let gap = 10.0;
+                let card_w = (content_right - content_left - (gap * 2.0)) / 3.0;
+                let card_h = (content_bottom - content_top - gap) / 2.0;
+                let card_left = content_left + 2.0 * (card_w + gap);
+                let card_top = content_top + 1.0 * (card_h + gap);
+                let card_right = card_left + card_w;
+                let card_bottom = card_top + card_h;
+
+                let fx = x as f32;
+                let fy = y as f32;
+
+                if fx >= card_left && fx <= card_right && fy >= card_top && fy <= card_bottom {
+                    if ctx.media_info.has_media && (ctx.media_info.is_playing || !ctx.media_info.title.is_empty()) {
+                        let mini_art_size = 52.0;
+                        let mini_details_left = card_left + 14.0 + mini_art_size + 10.0;
+                        let mini_details_right = card_right - 12.0;
+                        let btn_row_y = card_top + 78.0;
+                        let ctrl_w = mini_details_right - mini_details_left;
+                        let p_cx = mini_details_left + (ctrl_w * 0.22);
+                        let play_cx = mini_details_left + (ctrl_w * 0.50);
+                        let n_cx = mini_details_left + (ctrl_w * 0.78);
+
+                        if (fy - btn_row_y).abs() <= 16.0 {
+                            if (fx - p_cx).abs() <= 14.0 {
+                                MediaWatcher::previous_track();
+                                return LRESULT(0);
+                            } else if (fx - play_cx).abs() <= 16.0 {
+                                MediaWatcher::toggle_play_pause();
+                                return LRESULT(0);
+                            } else if (fx - n_cx).abs() <= 14.0 {
+                                MediaWatcher::next_track();
+                                return LRESULT(0);
+                            }
+                        }
+
+                        // Clicking elsewhere on the media widget card jumps to full Media player tab
+                        ctx.active_tab = NotchTab::Media;
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    } else {
+                        // Clicking Notes card jumps to Notes tab
+                        ctx.active_tab = NotchTab::Notes;
+                        render_and_update_layered(hwnd, ctx);
+                        return LRESULT(0);
+                    }
+                }
+            }
+
             // Media control clicks when active_tab == NotchTab::Media
             if ctx.active_tab == NotchTab::Media {
                 let ear_r = 14.0 + (ctx.animation_progress * 6.0);
                 let content_left = ear_r + 14.0;
+                let content_right = ctx.current_w as f32 - ear_r - 14.0;
                 let content_top = 48.0;
                 let content_bottom = ctx.current_h as f32 - 56.0;
 
@@ -526,20 +585,22 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let art_left = content_left + 28.0;
                 let art_top = content_top + ((content_bottom - content_top - art_size) / 2.0);
                 let details_left = art_left + art_size + 28.0;
-                let btn_y = art_top + 120.0;
+                let details_right = content_right - 28.0;
+                let ctrl_center_x = (details_left + details_right) / 2.0;
+                let btn_y = art_top + 118.0;
 
-                if ((y as f32) - btn_y).abs() <= 20.0 {
-                    let prev_cx = details_left + 30.0;
-                    let play_cx = details_left + 80.0;
-                    let next_cx = details_left + 130.0;
+                if ((y as f32) - btn_y).abs() <= 24.0 {
+                    let prev_cx = ctrl_center_x - 52.0;
+                    let play_cx = ctrl_center_x;
+                    let next_cx = ctrl_center_x + 52.0;
 
-                    if ((x as f32) - prev_cx).abs() <= 16.0 {
+                    if ((x as f32) - prev_cx).abs() <= 20.0 {
                         MediaWatcher::previous_track();
                         return LRESULT(0);
-                    } else if ((x as f32) - play_cx).abs() <= 20.0 {
+                    } else if ((x as f32) - play_cx).abs() <= 24.0 {
                         MediaWatcher::toggle_play_pause();
                         return LRESULT(0);
-                    } else if ((x as f32) - next_cx).abs() <= 16.0 {
+                    } else if ((x as f32) - next_cx).abs() <= 20.0 {
                         MediaWatcher::next_track();
                         return LRESULT(0);
                     }
@@ -594,7 +655,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let content_left = ear_r + 14.0;
                 let content_top = 48.0;
                 let left_w = 280.0;
-                let right_left = content_left + left_w + 12.0;
+                let _right_left = content_left + left_w + 12.0;
                 let fx = x as f32;
                 let fy = y as f32;
 
@@ -751,7 +812,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let fy = y as f32;
 
                 let mut item_y = content_top + 50.0;
-                for (i, p) in ctx.prod_mgr.parked_files.clone().iter().take(5).enumerate() {
+                for (_i, p) in ctx.prod_mgr.parked_files.clone().iter().take(5).enumerate() {
                     if fx >= content_left + 24.0 && fx <= content_right && fy >= item_y && fy <= item_y + 24.0 {
                         // Open file on click via ShellExecute
                         let path_w: Vec<u16> = p.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
@@ -1068,8 +1129,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         } else if wparam.0 == TIMER_AUTOHIDE_ID {
             check_fullscreen_state(hwnd);
         } else if wparam.0 == TIMER_MEDIA_REFRESH_ID {
-            if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Media {
-                render_and_update_layered(hwnd, ctx);
+            ctx.media_info = ctx.media_watcher.get_info();
+            let is_playing = ctx.media_info.has_media && ctx.media_info.is_playing;
+            if is_playing {
+                if ctx.state == NotchState::Collapsed
+                    || (ctx.state == NotchState::Expanded
+                        && (ctx.active_tab == NotchTab::Media || ctx.active_tab == NotchTab::Home))
+                {
+                    render_and_update_layered(hwnd, ctx);
+                }
+            } else if ctx.state == NotchState::Expanded && ctx.active_tab == NotchTab::Media {
+                ctx.media_idle_ticks = (ctx.media_idle_ticks + 1) % 10;
+                if ctx.media_idle_ticks == 0 {
+                    render_and_update_layered(hwnd, ctx);
+                }
             }
         } else if wparam.0 == TIMER_LEAVE_COLLAPSE_ID {
             let _ = KillTimer(hwnd, TIMER_LEAVE_COLLAPSE_ID);
