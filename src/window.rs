@@ -1121,8 +1121,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     if msg == WM_TRAYICON {
         let event = (lparam.0 & 0xFFFF) as u32;
         if event == WM_RBUTTONUP || event == WM_LBUTTONUP {
+            let start_with_win = ctx.config.lock().unwrap().start_with_windows;
             if let Some(tray) = &ctx.tray {
-                tray.show_menu();
+                tray.show_menu(start_with_win);
             }
         }
         return LRESULT(0);
@@ -1133,6 +1134,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         match cmd_id {
             IDM_TRAY_OPEN => toggle_notch(hwnd, ctx),
             IDM_TRAY_PAUSE => ctx.paused_hover = !ctx.paused_hover,
+            IDM_TRAY_STARTUP => {
+                let mut cfg = ctx.config.lock().unwrap();
+                cfg.start_with_windows = !cfg.start_with_windows;
+                let _ = cfg.save();
+            }
             IDM_TRAY_SETTINGS => {
                 let _ = SettingsWindow::open_or_focus(ctx.config.clone());
             }

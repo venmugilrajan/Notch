@@ -39,7 +39,7 @@ impl TrayIcon {
         Ok(Self { hwnd, nid })
     }
 
-    pub fn show_menu(&self) {
+    pub fn show_menu(&self, start_with_windows: bool) {
         unsafe {
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
@@ -52,7 +52,8 @@ impl TrayIcon {
             let _ = AppendMenuW(hmenu, MF_STRING, IDM_TRAY_OPEN as usize, w!("Open Notch (Ctrl+Alt+N)"));
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(hmenu, MF_STRING, IDM_TRAY_PAUSE as usize, w!("Pause Hover"));
-            let _ = AppendMenuW(hmenu, MF_STRING, IDM_TRAY_STARTUP as usize, w!("Start with Windows"));
+            let startup_flags = if start_with_windows { MF_STRING | MF_CHECKED } else { MF_STRING | MF_UNCHECKED };
+            let _ = AppendMenuW(hmenu, startup_flags, IDM_TRAY_STARTUP as usize, w!("Start with Windows"));
             let _ = AppendMenuW(hmenu, MF_STRING, IDM_TRAY_SETTINGS as usize, w!("Settings"));
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(hmenu, MF_STRING, IDM_TRAY_QUIT as usize, w!("Quit NotchBar"));

@@ -120,12 +120,17 @@ impl AppConfig {
 
     pub fn load() -> Self {
         let path = Self::config_path();
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(cfg) = serde_json::from_str(&data) {
-                return cfg;
+        let cfg = if let Ok(data) = fs::read_to_string(&path) {
+            if let Ok(c) = serde_json::from_str(&data) {
+                c
+            } else {
+                Self::default()
             }
-        }
-        let cfg = Self::default();
+        } else {
+            Self::default()
+        };
+        // Synchronize Windows Registry run-at-startup state
+        sync_startup_registry(cfg.start_with_windows);
         let _ = cfg.save();
         cfg
     }
@@ -134,6 +139,53 @@ impl AppConfig {
         let path = Self::config_path();
         let json = serde_json::to_string_pretty(self)?;
         fs::write(path, json)?;
+        sync_startup_registry(self.start_with_windows);
         Ok(())
+    }
+}
+
+pub fn sync_startup_registry(enabled: bool) {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::System::Registry::*;
+
+    unsafe {
+        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let app_name = w!("NotchBar");
+        let mut hkey = HKEY::default();
+
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey,
+            0,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
+            &mut hkey,
+        )
+        .is_ok()
+        {
+            if enabled {
+                if let Ok(exe_path) = std::env::current_exe() {
+                    // Wrap path in quotes to handle any spaces safely
+                    let path_str = format!("\"{}\"", exe_path.to_string_lossy());
+                    let wide_path: Vec<u16> = path_str
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    let byte_slice = std::slice::from_raw_parts(
+                        wide_path.as_ptr() as *const u8,
+                        wide_path.len() * 2,
+                    );
+                    let _ = RegSetValueExW(
+                        hkey,
+                        app_name,
+                        0,
+                        REG_SZ,
+                        Some(byte_slice),
+                    );
+                }
+            } else {
+                let _ = RegDeleteValueW(hkey, app_name);
+            }
+            let _ = RegCloseKey(hkey);
+        }
     }
 }
