@@ -238,10 +238,10 @@ fn handle_settings_click(hwnd: HWND, ctx: &mut SettingsWindowContext, x: i32, y:
             let card_w = 260;
             let card_h = 76;
             let themes = [
-                ("Pure Black", 256, 140),
-                ("Ember Dark", 532, 140),
-                ("Vivid", 256, 230),
-                ("Silver", 532, 230),
+                ("Liquid Glass", 256, 140),
+                ("Pure Black", 532, 140),
+                ("Ember Dark", 256, 226),
+                ("Vivid", 532, 226),
             ];
 
             for (theme_name, tx, ty) in themes.iter() {
@@ -511,10 +511,10 @@ fn draw_settings_page_content(hdc: HDC, ctx: &SettingsWindowContext) {
 
                 // 2x2 grid preview cards
                 let themes = [
-                    ("Pure Black", "Monochrome on true black", 0x00FFFFFF, 256, 140),
-                    ("Ember Dark", "Black with orange accent #FF6A2B", 0x002BA2FF, 532, 140),
-                    ("Vivid", "Black with vivid blue #2F7BFF", 0x00FF7B2F, 256, 230),
-                    ("Silver", "Light panel #F2F2F2, black notch", 0x00D97706, 532, 230),
+                    ("Liquid Glass", "Tinted translucent acrylic finish", 0x00FFAD66, 256, 140),
+                    ("Pure Black", "Monochrome on true black", 0x00FFFFFF, 532, 140),
+                    ("Ember Dark", "Black with orange accent #FF6A2B", 0x002BA2FF, 256, 226),
+                    ("Vivid", "Black with vivid blue #2F7BFF", 0x00FF7B2F, 532, 226),
                 ];
 
                 let card_w = 260;

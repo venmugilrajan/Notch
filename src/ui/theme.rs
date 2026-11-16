@@ -6,6 +6,7 @@ pub enum ThemeMode {
     EmberDark,
     Vivid,
     Silver,
+    LiquidGlass,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -28,10 +29,29 @@ pub struct ThemeTokens {
 impl ThemeTokens {
     pub fn from_name(name: &str) -> Self {
         match name {
+            "Liquid Glass" | "Glass" | "liquidglass" | "glass" => Self::liquid_glass(),
             "Ember Dark" => Self::ember_dark(),
             "Vivid" => Self::vivid(),
             "Silver" => Self::silver(),
             _ => Self::pure_black(),
+        }
+    }
+
+    pub fn liquid_glass() -> Self {
+        Self {
+            mode: ThemeMode::LiquidGlass,
+            panel_bg: D2D1_COLOR_F { r: 0.08, g: 0.08, b: 0.10, a: 0.82 },
+            notch_collapsed_bg: D2D1_COLOR_F { r: 0.05, g: 0.05, b: 0.07, a: 0.90 },
+            card_bg: D2D1_COLOR_F { r: 0.14, g: 0.14, b: 0.18, a: 0.60 },
+            card_border: D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.14 },
+            dock_bg: D2D1_COLOR_F { r: 0.07, g: 0.07, b: 0.10, a: 0.75 },
+            text_primary: D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            text_secondary: D2D1_COLOR_F { r: 0.86, g: 0.88, b: 0.92, a: 0.60 },
+            text_muted: D2D1_COLOR_F { r: 0.80, g: 0.82, b: 0.88, a: 0.40 },
+            accent: D2D1_COLOR_F { r: 0.40, g: 0.68, b: 1.0, a: 1.0 },
+            accent_rgb: (0.40, 0.68, 1.0),
+            ring_track: D2D1_COLOR_F { r: 0.22, g: 0.24, b: 0.30, a: 0.50 },
+            outline: D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 },
         }
     }
 

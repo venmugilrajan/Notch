@@ -581,26 +581,51 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let content_top = 48.0;
                 let content_bottom = ctx.current_h as f32 - 56.0;
 
-                let art_size = 140.0;
-                let art_left = content_left + 28.0;
-                let art_top = content_top + ((content_bottom - content_top - art_size) / 2.0);
-                let details_left = art_left + art_size + 28.0;
-                let details_right = content_right - 28.0;
-                let ctrl_center_x = (details_left + details_right) / 2.0;
-                let btn_y = art_top + 118.0;
+                let card_w = 460.0f32.min(content_right - content_left - 20.0);
+                let card_h = 196.0f32.min(content_bottom - content_top - 10.0);
+                let card_left = content_left + ((content_right - content_left - card_w) / 2.0);
+                let card_top = content_top + ((content_bottom - content_top - card_h) / 2.0);
+                let card_right = card_left + card_w;
 
-                if ((y as f32) - btn_y).abs() <= 24.0 {
-                    let prev_cx = ctrl_center_x - 52.0;
-                    let play_cx = ctrl_center_x;
-                    let next_cx = ctrl_center_x + 52.0;
+                let padding_x = 22.0;
+                let art_left = card_left + padding_x;
+                let art_top = card_top + 20.0;
+                let btn_y = art_top + 124.0;
 
-                    if ((x as f32) - prev_cx).abs() <= 20.0 {
+                let fx = x as f32;
+                let fy = y as f32;
+
+                // Home button [ ⌂ ]
+                if (fy - btn_y).abs() <= 20.0 && fx >= art_left - 4.0 && fx <= art_left + 40.0 {
+                    ctx.active_tab = NotchTab::Home;
+                    render_and_update_layered(hwnd, ctx);
+                    return LRESULT(0);
+                }
+
+                // Timeline progress bar seeking
+                let track_left = art_left + 42.0;
+                let track_right = card_right - padding_x - 44.0;
+                let bar_y = art_top + 80.0;
+                if fy >= bar_y - 8.0 && fy <= bar_y + 12.0 && fx >= track_left && fx <= track_right {
+                    let ratio = ((fx - track_left) / (track_right - track_left)).clamp(0.0, 1.0);
+                    MediaWatcher::seek_to_ratio(ratio);
+                    return LRESULT(0);
+                }
+
+                // Centered Playback controls
+                let ctrl_cx = (card_left + card_right) / 2.0;
+                if (fy - btn_y).abs() <= 24.0 {
+                    let prev_cx = ctrl_cx - 56.0;
+                    let play_cx = ctrl_cx;
+                    let next_cx = ctrl_cx + 56.0;
+
+                    if (fx - prev_cx).abs() <= 20.0 {
                         MediaWatcher::previous_track();
                         return LRESULT(0);
-                    } else if ((x as f32) - play_cx).abs() <= 24.0 {
+                    } else if (fx - play_cx).abs() <= 24.0 {
                         MediaWatcher::toggle_play_pause();
                         return LRESULT(0);
-                    } else if ((x as f32) - next_cx).abs() <= 20.0 {
+                    } else if (fx - next_cx).abs() <= 20.0 {
                         MediaWatcher::next_track();
                         return LRESULT(0);
                     }

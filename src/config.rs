@@ -93,7 +93,7 @@ impl Default for AppConfig {
             auto_collapse_delay_ms: 400,
             hotkey_modifiers: 0x0002 | 0x0001, // MOD_CONTROL | MOD_ALT
             hotkey_vk: 0x4E,                  // 'N'
-            theme: "Pure Black".to_string(),
+            theme: "Liquid Glass".to_string(),
             outline_enabled: true,
             outline_width: 1,
             user_name: "User".to_string(),

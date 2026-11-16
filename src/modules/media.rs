@@ -73,16 +73,143 @@ impl MediaWatcher {
     }
 
     pub fn toggle_play_pause() {
-        simulate_media_key(VK_MEDIA_PLAY_PAUSE);
+        thread::spawn(|| {
+            unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+            if !control_via_smtc(MediaCommand::TogglePlayPause) {
+                simulate_media_key(VK_MEDIA_PLAY_PAUSE);
+            }
+        });
     }
 
     pub fn next_track() {
-        simulate_media_key(VK_MEDIA_NEXT_TRACK);
+        thread::spawn(|| {
+            unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+            if !control_via_smtc(MediaCommand::Next) {
+                simulate_media_key(VK_MEDIA_NEXT_TRACK);
+            }
+        });
     }
 
     pub fn previous_track() {
-        simulate_media_key(VK_MEDIA_PREV_TRACK);
+        thread::spawn(|| {
+            unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+            if !control_via_smtc(MediaCommand::Previous) {
+                simulate_media_key(VK_MEDIA_PREV_TRACK);
+            }
+        });
     }
+
+    pub fn seek_to_ratio(ratio: f32) {
+        let r = ratio.clamp(0.0, 1.0);
+        thread::spawn(move || {
+            unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+            let Ok(req) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() else { return; };
+            let Some(mgr) = wait_for_async(req) else { return; };
+
+            let mut target_session = None;
+            if let Ok(sessions) = mgr.GetSessions() {
+                if let Ok(size) = sessions.Size() {
+                    let mut playing_candidates = Vec::new();
+                    let mut all_candidates = Vec::new();
+                    for i in 0..size {
+                        if let Ok(s) = sessions.GetAt(i) {
+                            let is_playing = s
+                                .GetPlaybackInfo()
+                                .ok()
+                                .and_then(|info| info.PlaybackStatus().ok())
+                                .map(|status| status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+                                .unwrap_or(false);
+                            if is_playing {
+                                playing_candidates.push(s);
+                            } else {
+                                all_candidates.push(s);
+                            }
+                        }
+                    }
+                    target_session = playing_candidates.into_iter().next().or_else(|| all_candidates.into_iter().next());
+                }
+            }
+
+            if target_session.is_none() {
+                target_session = mgr.GetCurrentSession().ok();
+            }
+
+            if let Some(session) = target_session {
+                if let Ok(timeline) = session.GetTimelineProperties() {
+                    if let Ok(end) = timeline.EndTime() {
+                        let target_ticks = (end.Duration as f64 * r as f64) as i64;
+                        if let Ok(op) = session.TryChangePlaybackPositionAsync(target_ticks) {
+                            let _ = wait_for_async(op);
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MediaCommand {
+    TogglePlayPause,
+    Next,
+    Previous,
+}
+
+fn control_via_smtc(cmd: MediaCommand) -> bool {
+    let Ok(req) = GlobalSystemMediaTransportControlsSessionManager::RequestAsync() else { return false; };
+    let Some(mgr) = wait_for_async(req) else { return false; };
+
+    let mut target_session = None;
+    if let Ok(sessions) = mgr.GetSessions() {
+        if let Ok(size) = sessions.Size() {
+            let mut playing_candidates = Vec::new();
+            let mut all_candidates = Vec::new();
+            for i in 0..size {
+                if let Ok(s) = sessions.GetAt(i) {
+                    let is_playing = s
+                        .GetPlaybackInfo()
+                        .ok()
+                        .and_then(|info| info.PlaybackStatus().ok())
+                        .map(|status| status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+                        .unwrap_or(false);
+                    if is_playing {
+                        playing_candidates.push(s);
+                    } else {
+                        all_candidates.push(s);
+                    }
+                }
+            }
+            target_session = playing_candidates.into_iter().next().or_else(|| all_candidates.into_iter().next());
+        }
+    }
+
+    if target_session.is_none() {
+        target_session = mgr.GetCurrentSession().ok();
+    }
+
+    let Some(session) = target_session else { return false; };
+
+    match cmd {
+        MediaCommand::TogglePlayPause => {
+            if let Ok(op) = session.TryTogglePlayPauseAsync() {
+                let _ = wait_for_async(op);
+                return true;
+            }
+        }
+        MediaCommand::Next => {
+            if let Ok(op) = session.TrySkipNextAsync() {
+                let _ = wait_for_async(op);
+                return true;
+            }
+        }
+        MediaCommand::Previous => {
+            if let Ok(op) = session.TrySkipPreviousAsync() {
+                let _ = wait_for_async(op);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn simulate_media_key(vk: VIRTUAL_KEY) {
@@ -133,7 +260,7 @@ static CACHED_THUMBNAIL: std::sync::Mutex<Option<(String, String, Option<Vec<u8>
 fn wait_for_async<T: RuntimeType + 'static>(
     op: windows::Foundation::IAsyncOperation<T>,
 ) -> Option<T> {
-    for _ in 0..30 {
+    for _ in 0..50 {
         if let Ok(status) = op.Status() {
             if status == AsyncStatus::Completed {
                 return op.GetResults().ok();
@@ -141,7 +268,7 @@ fn wait_for_async<T: RuntimeType + 'static>(
                 return None;
             }
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(20));
     }
     None
 }
@@ -149,7 +276,7 @@ fn wait_for_async<T: RuntimeType + 'static>(
 fn wait_for_async_load(
     op: windows::Storage::Streams::DataReaderLoadOperation,
 ) -> Option<u32> {
-    for _ in 0..30 {
+    for _ in 0..50 {
         if let Ok(status) = op.Status() {
             if status == AsyncStatus::Completed {
                 return op.GetResults().ok();
@@ -157,7 +284,7 @@ fn wait_for_async_load(
                 return None;
             }
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(20));
     }
     None
 }
@@ -236,18 +363,22 @@ fn query_smtc() -> Option<MediaInfo> {
 
     let thumbnail_bytes = {
         let mut cache = CACHED_THUMBNAIL.lock().unwrap();
-        if let Some((ref cached_title, ref cached_artist, ref cached_bytes)) = *cache {
+        if let Some((ref cached_title, ref cached_artist, Some(ref bytes))) = *cache {
             if cached_title == &title && cached_artist == &artist {
-                cached_bytes.clone()
+                Some(bytes.clone())
             } else {
-                let bytes = fetch_thumbnail(&props);
-                *cache = Some((title.clone(), artist.clone(), bytes.clone()));
-                bytes
+                let fetched = fetch_thumbnail(&props);
+                if fetched.is_some() {
+                    *cache = Some((title.clone(), artist.clone(), fetched.clone()));
+                }
+                fetched
             }
         } else {
-            let bytes = fetch_thumbnail(&props);
-            *cache = Some((title.clone(), artist.clone(), bytes.clone()));
-            bytes
+            let fetched = fetch_thumbnail(&props);
+            if fetched.is_some() {
+                *cache = Some((title.clone(), artist.clone(), fetched.clone()));
+            }
+            fetched
         }
     };
 
